@@ -7,6 +7,8 @@ use crate::gems::{GemCensus, gems_owning_constant};
 use crate::ident::{ClassId, Symbol};
 use crate::ty::Ty;
 
+use super::generated_names::{self, Generated};
+
 /// Ambiguity is not absence: a legacy method-name match must not bypass it.
 pub(super) enum GemClaim<'a> {
     Absent,
@@ -25,6 +27,8 @@ struct AncestryEdge {
 /// include-only modules are supplemented from source, not added to typed IR.
 pub(super) struct GemAncestry {
     edges: HashMap<ClassId, Vec<AncestryEdge>>,
+    /// State-machine declarations in each class or module body.
+    generated: HashMap<ClassId, Vec<Generated>>,
 }
 
 impl GemAncestry {
@@ -57,7 +61,7 @@ impl GemAncestry {
                 crate::analyze::controller_includes(controller),
             );
         }
-        let mut ancestry = Self { edges };
+        let mut ancestry = Self { edges, generated: HashMap::new() };
         // Include-only reopens may be omitted even when an earlier declaration
         // survives. Supplement all literal module includes, without replacing
         // lossy IR edges that may come from other declarations/concern blocks.
@@ -91,6 +95,11 @@ impl GemAncestry {
             };
             scopes.push(id.clone());
             if let Some(body) = body {
+                let mut found = Vec::new();
+                generated_names::harvest_body(&body, &mut found);
+                if !found.is_empty() {
+                    self.generated.entry(id.clone()).or_default().extend(found);
+                }
                 if node.as_module_node().is_some() {
                     self.record_module_includes(&body, &id, scopes);
                 }
@@ -254,6 +263,50 @@ impl GemAncestry {
             }
             _ => GemClaim::Uncertain,
         }
+    }
+
+    /// The DSL (and the class or module declaring it) that generates
+    /// `method` for this receiver: its own body, a parent's, or an
+    /// included concern's. Every non-nil arm of a union must agree, and
+    /// two DSLs generating the same name claim nothing.
+    pub(super) fn generating_dsl(&self, ty: &Ty, method: &str) -> Option<(&'static str, ClassId)> {
+        match ty {
+            Ty::Class { id, .. } | Ty::Relation { of: id } => self.class_generating_dsl(id, method),
+            Ty::Union { variants } => {
+                let mut arms = variants.iter().filter(|ty| !matches!(ty, Ty::Nil));
+                let first = self.generating_dsl(arms.next()?, method)?;
+                arms.all(|arm| self.generating_dsl(arm, method).is_some_and(|(dsl, _)| dsl == first.0))
+                    .then_some(first)
+            }
+            _ => None,
+        }
+    }
+
+    fn class_generating_dsl(&self, id: &ClassId, method: &str) -> Option<(&'static str, ClassId)> {
+        let mut pending = vec![id.clone()];
+        let mut seen = HashSet::new();
+        let mut found: Option<(&'static str, ClassId)> = None;
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            for generated in self.generated.get(&id).into_iter().flatten() {
+                if !generated.names.contains(method) {
+                    continue;
+                }
+                match &found {
+                    Some((dsl, _)) if *dsl != generated.dsl => return None,
+                    Some(_) => {}
+                    None => found = Some((generated.dsl, id.clone())),
+                }
+            }
+            // An edge that may resolve to a local shadow is skipped, not
+            // fatal: a declaration found elsewhere is still evidence.
+            for edge in self.edges.get(&id).into_iter().flatten() {
+                pending.extend(self.resolve_edge(&id, edge));
+            }
+        }
+        found
     }
 
     fn resolve_edge(&self, owner: &ClassId, edge: &AncestryEdge) -> Option<ClassId> {

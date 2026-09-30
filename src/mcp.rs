@@ -263,6 +263,7 @@ impl Server {
         // lines naming the gap — an agent reading this output must be able
         // to tell "your code has a problem" from "roundhouse didn't
         // analyze the construct responsible".
+        crate::analyze::attribution::attribute_generated_names(&mut diags, &app);
         crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
         crate::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
         diags.extend(parse_diags);
@@ -445,6 +446,7 @@ impl Server {
         };
         let census = crate::gems::GemCensus::of(lock);
         let mut diags = crate::analyze::diagnose(&app);
+        crate::analyze::attribution::attribute_generated_names(&mut diags, &app);
         crate::analyze::attribution::attribute_ingest_gaps(&mut diags, &app, &gaps);
         crate::analyze::attribution::attribute_unknown_gems(&mut diags, &app);
         let attributed = |gem: &str| {

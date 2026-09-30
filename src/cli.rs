@@ -189,6 +189,9 @@ pub fn check(args: &[String], default_app: &str) -> ExitCode {
     };
     crate::timings::phase("analyze", || Analyzer::new(&app).analyze(&mut app));
     let mut diags = crate::timings::phase("diagnose", || diagnose(&app));
+    // A call to a method a state-machine declaration generates
+    // (`publish!` from `event :publish`) names that declaration's gem.
+    crate::analyze::attribution::attribute_generated_names(&mut diags, &app);
     // Survey mode: diagnostics that trace back to a recorded ingest gap
     // are the tool's coverage problem, not the app's — downgrade them to
     // notes with the root cause attached so the error count below means
