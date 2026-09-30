@@ -1947,7 +1947,8 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         ColumnType::Float | ColumnType::Decimal { .. } => Ty::Float,
         ColumnType::String { .. } | ColumnType::Text => Ty::Str,
         ColumnType::Boolean => Ty::Bool,
-        ColumnType::Date | ColumnType::DateTime | ColumnType::Time => Ty::Time,
+        ColumnType::Date => Ty::Date,
+        ColumnType::DateTime | ColumnType::Time => Ty::Time,
         ColumnType::Binary => Ty::Str,
         // A `json` column is stored TEXT and nothing parses it: the
         // Row field, hydration, `[]`, `attributes` and the adapter's
