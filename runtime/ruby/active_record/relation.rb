@@ -306,6 +306,33 @@ module ActiveRecord
       words.length == 2 && words[1].upcase == "DESC"
     end
 
+    # Flip each ORDER BY term so a `LIMIT n` from the other end is the
+    # tail in original order. `"created_at"` becomes `"created_at DESC"`;
+    # `"created_at DESC"` becomes `"created_at"`. An empty list is the
+    # primary key descending, matching Rails' `last` on an unordered
+    # relation. Terms this cannot parse (expressions, multi-column
+    # fragments) answer nil so `last_n` falls back to materializing.
+    def reverse_order_terms(terms)
+      if terms.length == 0
+        pk = @model.primary_key
+        return ["#{@table}.#{pk} DESC"]
+      end
+      out = []
+      i = 0
+      while i < terms.length
+        t = terms[i].to_s
+        return nil if order_column(t).nil?
+        col_sql = t.strip.split(/\s+/)[0]
+        if order_descending?(t)
+          out << col_sql
+        else
+          out << "#{col_sql} DESC"
+        end
+        i += 1
+      end
+      out
+    end
+
     # SQLite's ordering of two attribute values: NULL sorts first, then
     # like compares with like. nil for a pair this cannot order, which
     # sends the caller back to the database.
@@ -937,8 +964,8 @@ module ActiveRecord
     end
 
     def last
-      rows = to_a
-      rows.length == 0 ? nil : rows[rows.length - 1]
+      rows = last_n(1)
+      rows.length == 0 ? nil : rows[0]
     end
 
     # Rails' `first(n)` / `last(n)` — the COUNTED forms, which answer an
@@ -968,12 +995,30 @@ module ActiveRecord
     # (campfire's `ordered.last(PAGE_SIZE)` is the oldest-to-newest tail
     # of a room's messages, which is the order the page renders).
     #
-    # Materializes the whole relation, exactly as the bare `last` above
-    # already does: reversing the ORDER BY to push the tail into SQL
-    # would have to rewrite every `@order` entry's direction, and no
-    # caller in the corpus is on a table where that pays yet.
+    # Rails pushes this into SQL: reverse each ORDER BY, LIMIT n, then
+    # reverse the rows so the original direction is restored. Campfire's
+    # `/rooms/1` is `ordered.last(PAGE_SIZE)` over a room that can hold
+    # hundreds of messages; materializing the whole relation hydrated
+    # every row and ran `includes` (creator, rich text, boosts) for all
+    # of them. An OFFSET stays on the materialize fallback — combining
+    # it with a reversed LIMIT is not the same window.
     def last_n(n)
-      to_a.last(n)
+      reversed = reverse_order_terms(@orders)
+      if reversed.nil? || !@offset.nil?
+        rows = to_a
+        @records = nil
+        return rows.last(n)
+      end
+      prior_limit = @limit
+      prior_orders = @orders
+      @orders = reversed
+      @limit = n
+      rows = to_a
+      @limit = prior_limit
+      @orders = prior_orders
+      @records = nil
+      rows.reverse!
+      rows
     end
 
     def count

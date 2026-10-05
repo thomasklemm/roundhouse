@@ -35,6 +35,7 @@ module ActiveRecord
     def sort_in_place!: (untyped sorted, Array[String] terms) -> bool
     def order_column: (String term) -> String?
     def order_descending?: (String term) -> bool
+    def reverse_order_terms: (Array[untyped] terms) -> Array[String]?
     # The keys are whatever the ordered column holds, and `<=>` on two
     # of them is an Integer or nil -- the only honest spellings.
     def compare_order_keys: (untyped a, untyped b) -> Integer?
