@@ -302,6 +302,12 @@ impl std::ops::Deref for Emitted {
     }
 }
 
+impl AsRef<Path> for Emitted {
+    fn as_ref(&self) -> &Path {
+        self.0.as_path()
+    }
+}
+
 impl Drop for Emitted {
     fn drop(&mut self) {
         remove_scratch(&self.0);
