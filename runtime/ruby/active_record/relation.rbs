@@ -41,8 +41,8 @@ module ActiveRecord
     def order_key_of: (untyped record, String col) -> untyped
     def where!: (?untyped condition, *untyped args) -> Relation
     def order!: (*untyped parts) -> Relation
-    def limit: (Integer n) -> Relation
-    def offset: (Integer n) -> Relation
+    def limit: (untyped n) -> Relation
+    def offset: (untyped n) -> Relation
     # Kaminari's pagination surface (see the .rb): `page` / `per` take
     # whatever the request handed over (a params String, an Integer or
     # nil) and read it through `to_s`.
@@ -202,5 +202,10 @@ module ActiveRecord
     def substitute_binds: (String sql, Array[untyped] args) -> String
     def escape_list: (Array[untyped] vals) -> String
     def order_term: (untyped p) -> String
+    def sql_limit: (untyped n) -> Integer
+    def order_direction: (untyped dir) -> String
+    def sql_ident: (untyped name) -> String
+    def order_hash_column: (untyped col) -> String
+    def order_string: (String s) -> String
   end
 end
