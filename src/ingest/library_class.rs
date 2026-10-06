@@ -294,14 +294,15 @@ pub(super) fn library_class_and_struct_base(
     // `class Page < Array` — it would build, then answer differently
     // from CRuby for `is_a?`/`==`/`p` until a real Array subclass
     // exists (spinel `refuse_builtin_subclass`). Rewrite into an
-    // Object that wraps the records in `@elements` and exposes the
-    // Array surface Campfire's pagination page needs (`to_a`/`to_ary`
-    // for collection render, `each`/`any?`/`+`/`first`/`last`/…).
-    // Same shape Spinel's refusal message asks the program for; done
-    // here so every target sees one typed class, not a spinel-only
-    // emit special case. Size-based `super(n, fill)` and other
-    // Array#initialize forms the wrapper cannot represent keep the
-    // Array parent (honest dynamic path) rather than a partial wrap.
+    // Object that wraps the records in `@elements` and exposes Array's
+    // collection protocol (`to_a`/`to_ary`/`each`/`map`/`first(*args)` /
+    // blockful `any?`/`count`/…). Same shape Spinel's refusal message
+    // asks the program for; done here so every target sees one typed
+    // class, not a spinel-only emit special case. Size-based `super(n,
+    // fill)` and other Array#initialize forms the wrapper cannot
+    // represent keep the Array parent (honest dynamic path). This is
+    // not Array identity (`is_a?(Array)` stays false) — Spinel #7584
+    // is the honest subclass path.
     let (parent, methods) = if parent.as_ref().is_some_and(is_array_parent) {
         match try_wrap_array_subclass(&owner, methods) {
             Ok(wrapped) => (None, wrapped),
@@ -702,8 +703,9 @@ fn block_of(param: &str, body: Expr) -> Expr {
     )
 }
 
-/// `Array` or `::Array` in superclass position — the only core class
-/// Campfire subclasses today (`Message::Pagination::Page < Array`).
+/// `Array` or `::Array` in superclass position. Owner name is unused —
+/// any wrappable library-class Array subclass is rewritten, not only
+/// Campfire's `Message::Pagination::Page`.
 fn is_array_parent(parent: &ClassId) -> bool {
     matches!(parent.0.as_str(), "Array" | "::Array")
 }
@@ -715,11 +717,12 @@ fn is_array_parent(parent: &ClassId) -> bool {
 /// caller keeps the Array parent so dispatch stays honest.
 ///
 /// `super(records)` in `initialize` becomes `@elements = records`.
-/// Synthesized forwards cover the Array surface the corpus actually
-/// calls on a page. A user override that is only bare/`super(…)` for a
-/// synthesized name is dropped so the forward wins — otherwise
-/// `def first; super; end` would keep `super` after the Array parent
-/// is cleared and raise at runtime.
+/// Synthesized forwards cover Array's collection protocol (`to_a` /
+/// `each` / `map` / `first(*args)` / blockful `any?`/`count`/…). A user
+/// override that is only bare/`super(…)` for a synthesized name is
+/// dropped so the forward wins — otherwise `def first; super; end`
+/// would keep `super` after the Array parent is cleared and raise.
+/// The wrap is not Array identity: `is_a?(Array)` stays false.
 fn try_wrap_array_subclass(
     owner: &ClassId,
     mut methods: Vec<MethodDef>,
@@ -734,36 +737,19 @@ fn try_wrap_array_subclass(
     }
     let synth_names: HashSet<String> = [
         "to_a", "to_ary", "each", "+", "any?", "empty?", "size", "length", "count", "first",
-        "last", "drop", "all?",
+        "last", "drop", "all?", "map", "select", "include?", "[]",
     ]
     .into_iter()
     .map(str::to_string)
     .collect();
     // Pure-`super` overrides of synthesized names would leave a dead
-    // `super` after the Array parent is cleared. Drop only 0-arg
-    // `first`/`last` (the synth surface); `def first(n); super(n); end`
-    // stays — the wrapper cannot represent Array#first(n).
+    // `super` after the Array parent is cleared. Drop them (including
+    // `def first(n); super(n); end`) so the splat/block forward wins.
     methods.retain(|m| {
         if m.receiver != MethodReceiver::Instance || !synth_names.contains(m.name.as_str()) {
             return true;
         }
-        if !is_pure_super_body(&m.body) {
-            return true;
-        }
-        let positional = m
-            .params
-            .iter()
-            .filter(|p| {
-                !p.keyword
-                    && !p.rest
-                    && !p.from_keyword
-                    && !p.name.as_str().is_empty()
-                    && p.name.as_str() != "self"
-            })
-            .count();
-        // Drop 0-arg pure-super (`def first; super; end`) so synth wins.
-        // Keep `def first(n); super(n); end` — synth is 0-arg.
-        positional != 0
+        !is_pure_super_body(&m.body)
     });
     let existing: HashSet<String> = methods
         .iter()
@@ -896,6 +882,52 @@ fn rewrite_array_super_to_elements(expr: &mut Expr, params: &[Param]) {
     }
 }
 
+fn splat_local(name: &str) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Splat { value: local(name) },
+    )
+}
+
+fn yield_x() -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Yield {
+            args: vec![local("x")],
+        },
+    )
+}
+
+/// `@elements.name(*args)` or `@elements.name(*args) { |x| yield x }`.
+fn elements_send(method: &str, args: Vec<Expr>, with_block: bool) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::Send {
+            recv: Some(Expr::new(
+                Span::synthetic(),
+                ExprNode::Ivar {
+                    name: Symbol::from("elements"),
+                },
+            )),
+            method: Symbol::from(method),
+            args,
+            block: with_block.then(|| block_of("x", yield_x())),
+            parenthesized: true,
+        },
+    )
+}
+
+fn if_block_given(then_branch: Expr, else_branch: Expr) -> Expr {
+    Expr::new(
+        Span::synthetic(),
+        ExprNode::If {
+            cond: call(None, "block_given?", vec![]),
+            then_branch,
+            else_branch,
+        },
+    )
+}
+
 fn synth_array_wrapper_methods(owner: &ClassId) -> Vec<MethodDef> {
     let ivar = || {
         Expr::new(
@@ -922,6 +954,7 @@ fn synth_array_wrapper_methods(owner: &ClassId) -> Vec<MethodDef> {
         mutates_self: false,
         block_param: None,
     };
+    let rest = || vec![Param::rest(Symbol::from("args"))];
     let forward0 = |name: &str| {
         method(
             name,
@@ -938,83 +971,59 @@ fn synth_array_wrapper_methods(owner: &ClassId) -> Vec<MethodDef> {
             false,
         )
     };
-    // `@elements.each { |x| yield x }; self` — same yield-through
-    // shape Relation uses for Enumerable terminals; keeps the page
-    // as the `each` return value (Array#each contract).
-    let all_body = Expr::new(
-        Span::synthetic(),
-        ExprNode::If {
-            cond: call(None, "block_given?", vec![]),
-            then_branch: Expr::new(
-                Span::synthetic(),
-                ExprNode::Send {
-                    recv: Some(ivar()),
-                    method: Symbol::from("all?"),
-                    args: vec![],
-                    block: Some(block_of(
-                        "x",
-                        Expr::new(
-                            Span::synthetic(),
-                            ExprNode::Yield {
-                                args: vec![local("x")],
-                            },
-                        ),
-                    )),
-                    parenthesized: false,
-                },
+    // `first(*args)` / `last(*args)` so `page.first(2)` reaches Array.
+    let forward_splat = |name: &str| {
+        method(
+            name,
+            rest(),
+            elements_send(name, vec![splat_local("args")], false),
+            false,
+        )
+    };
+    // Yield-through Enumerable: block → `@elements.m(*args) { |x| yield x }`,
+    // else the Enumerator / no-block form (`map`, `any?`, `count`, `all?`).
+    let forward_enumerable = |name: &str| {
+        method(
+            name,
+            rest(),
+            if_block_given(
+                elements_send(name, vec![splat_local("args")], true),
+                elements_send(name, vec![splat_local("args")], false),
             ),
-            else_branch: call(Some(ivar()), "all?", vec![]),
-        },
-    );
-    // Yield through when a block is given; otherwise return the
-    // Enumerator `@elements.each` produces (Array#each contract).
-    let each_body = Expr::new(
-        Span::synthetic(),
-        ExprNode::If {
-            cond: call(None, "block_given?", vec![]),
-            then_branch: Expr::new(
-                Span::synthetic(),
-                ExprNode::Seq {
-                    exprs: vec![
-                        Expr::new(
-                            Span::synthetic(),
-                            ExprNode::Send {
-                                recv: Some(ivar()),
-                                method: Symbol::from("each"),
-                                args: vec![],
-                                block: Some(block_of(
-                                    "x",
-                                    Expr::new(
-                                        Span::synthetic(),
-                                        ExprNode::Yield {
-                                            args: vec![local("x")],
-                                        },
-                                    ),
-                                )),
-                                parenthesized: false,
-                            },
-                        ),
-                        Expr::new(Span::synthetic(), ExprNode::SelfRef),
-                    ],
-                },
-            ),
-            else_branch: call(Some(ivar()), "each", vec![]),
-        },
+            true,
+        )
+    };
+    // Array#each returns self after yielding; without a block, the Enumerator.
+    let each_body = if_block_given(
+        Expr::new(
+            Span::synthetic(),
+            ExprNode::Seq {
+                exprs: vec![
+                    elements_send("each", vec![], true),
+                    Expr::new(Span::synthetic(), ExprNode::SelfRef),
+                ],
+            },
+        ),
+        call(Some(ivar()), "each", vec![]),
     );
     vec![
         method("to_a", vec![], ivar(), false),
         method("to_ary", vec![], ivar(), false),
         method("each", vec![], each_body, true),
         forward1("+", "other"),
-        forward0("any?"),
+        forward_enumerable("any?"),
         forward0("empty?"),
         forward0("size"),
         forward0("length"),
-        forward0("count"),
-        forward0("first"),
-        forward0("last"),
+        forward_enumerable("count"),
+        forward_splat("first"),
+        forward_splat("last"),
         forward1("drop", "n"),
-        method("all?", vec![], all_body, true),
+        forward_enumerable("all?"),
+        forward_enumerable("map"),
+        forward_enumerable("select"),
+        forward1("include?", "item"),
+        forward1("[]", "index"),
     ]
 }
 

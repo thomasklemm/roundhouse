@@ -75,7 +75,10 @@ end
         .filter(|m| m.receiver == roundhouse::dialect::MethodReceiver::Instance)
         .map(|m| m.name.as_str())
         .collect();
-    for required in ["to_a", "to_ary", "each", "+", "any?", "first", "last", "loaded?"] {
+    for required in [
+        "to_a", "to_ary", "each", "+", "any?", "first", "last", "map", "count", "select",
+        "include?", "[]", "loaded?",
+    ] {
         assert!(
             names.iter().any(|n| *n == required),
             "missing `{required}` on wrapped Page; have {names:?}"
@@ -88,7 +91,9 @@ end
     let paths: Vec<String> = files.iter().map(|f| f.path.display().to_string()).collect();
     let src = files
         .iter()
-        .find(|f| f.content.contains("def loaded?") && f.path.extension().is_some_and(|e| e == "rb"))
+        .find(|f| {
+            f.content.contains("def loaded?") && f.path.extension().is_some_and(|e| e == "rb")
+        })
         .map(|f| f.content.as_str())
         .unwrap_or("");
     assert!(
@@ -107,6 +112,24 @@ end
     assert!(
         !src.contains("super(records)"),
         "super(records) must become @elements = records:\n{src}"
+    );
+    assert!(
+        src.contains("first(*args)") && src.contains("@elements.first(*args)"),
+        "first must splat-forward so first(n) works:\n{src}"
+    );
+    assert!(
+        src.contains("def map(*args)") && src.contains("@elements.map(*args)"),
+        "map must forward with optional block:\n{src}"
+    );
+    assert!(
+        src.contains("def any?(*args)") && src.contains("def count(*args)"),
+        "any?/count must accept a block via rest+block_given?:\n{src}"
+    );
+    // Honesty ledger: the wrap is not Array. `is_a?(Array)` stays false;
+    // we do not override kind_of?/is_a?. Spinel #7584 is the real subclass.
+    assert!(
+        !src.contains("def is_a?") && !src.contains("def kind_of?"),
+        "wrap must not fake Array identity:\n{src}"
     );
 }
 
@@ -153,10 +176,7 @@ end
         .find(|f| f.content.contains("@elements") && f.content.contains("def initialize"))
         .map(|f| f.content.as_str())
         .unwrap_or("");
-    assert!(
-        !src.is_empty(),
-        "expected emitted Page with @elements"
-    );
+    assert!(!src.is_empty(), "expected emitted Page with @elements");
     assert!(
         src.contains("@elements = records"),
         "bare super in initialize must forward first positional:\n{src}"
@@ -216,7 +236,9 @@ end
         .find(|lc| lc.name.0.as_str() == "Message::Pagination::Page")
         .expect("Page library class");
     assert!(
-        page.parent.as_ref().is_some_and(|p| p.0.as_str() == "Array"),
+        page.parent
+            .as_ref()
+            .is_some_and(|p| p.0.as_str() == "Array"),
         "size+fill super must keep Array parent, got {:?}",
         page.parent
     );
@@ -260,7 +282,9 @@ end
         .find(|lc| lc.name.0.as_str() == "Message::Pagination::Page")
         .expect("Page library class");
     assert!(
-        page.parent.as_ref().is_some_and(|p| p.0.as_str() == "Array"),
+        page.parent
+            .as_ref()
+            .is_some_and(|p| p.0.as_str() == "Array"),
         "super(3) size form must keep Array parent, got {:?}",
         page.parent
     );
@@ -311,3 +335,58 @@ end
     );
 }
 
+#[test]
+fn pure_super_first_n_yields_splat_forward() {
+    let mut app = ingest_app_from_tree(tree(&[
+        (
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "messages", force: :cascade do |t|
+    t.string "body"
+  end
+end
+"#,
+        ),
+        (
+            "app/models/message.rb",
+            r#"class Message < ApplicationRecord
+end
+"#,
+        ),
+        (
+            "app/models/message/pagination.rb",
+            r#"module Message::Pagination
+  class Page < Array
+    def initialize(records)
+      super(records)
+    end
+
+    def first(n)
+      super(n)
+    end
+  end
+end
+"#,
+        ),
+    ]))
+    .expect("ingest");
+    roundhouse::session::analyze_and_lower(&mut app);
+    let files = ruby::emit_library(&app);
+    let src = files
+        .iter()
+        .find(|f| f.content.contains("@elements") && f.content.contains("def first"))
+        .map(|f| f.content.as_str())
+        .unwrap_or("");
+    assert!(
+        src.contains("def first(*args)"),
+        "pure-super first(n) must yield splat forward:\n{src}"
+    );
+    let has_dead_super_first = src.split("def first").skip(1).any(|chunk| {
+        let body = chunk.split("def ").next().unwrap_or("");
+        body.contains("super") && !body.contains("@elements")
+    });
+    assert!(
+        !has_dead_super_first,
+        "pure-super first(n) must not survive as dead super:\n{src}"
+    );
+}
