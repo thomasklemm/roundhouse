@@ -802,7 +802,12 @@ pub(super) fn expand_class_body_dsl(
     leading_comments: &[Comment],
     resolve_constant: &impl Fn(&Node<'_>) -> Option<Vec<(String, Literal)>>,
 ) -> IngestResult<Option<ClassBodyExpansion>> {
-    match super::delegated_type::expand_delegated_type_decl(call, file, leading_comments)? {
+    match super::delegated_type::expand_delegated_type_decl(
+        call,
+        file,
+        leading_comments,
+        resolve_constant,
+    )? {
         Some(items) => return Ok(Some(ClassBodyExpansion::DelegatedType(items))),
         None => {}
     }

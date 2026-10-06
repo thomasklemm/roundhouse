@@ -1,13 +1,18 @@
 //! `delegated_type :role, types: …, **options` — Rails' polymorphic
 //! superclass pattern, expanded at ingest like `enum`.
 //!
-//! Bounded to a literal `types:` list of class names (`%w[]`, `%i[]`,
-//! `["Message", …]`), including namespaced `Access::NoticeMessage`.
+//! `types:` accepts a compile-time-resolvable class list: a literal
+//! (`%w[]`, `%i[]`, `["Message", …]`, including namespaced
+//! `Access::NoticeMessage`) or a constant / concern-constant that
+//! folds to one (`Leafable::TYPES`, `TYPES`, `TYPES.freeze`). Anything
+//! else fails closed — unexpanded — so the unsupported ledger stays
+//! honest.
+//!
 //! Documented options (`foreign_key`, `foreign_type`, `primary_key`,
 //! `dependent: :destroy`, plus `optional`/`touch`/`default` forwarded
 //! to `belongs_to`) are honored; other `dependent:` values and
 //! unmodeled belongs_to kwargs (`class_name`, `autosave`, …) stay
-//! unexpanded so the unsupported ledger remains honest.
+//! unexpanded.
 
 use ruby_prism::Node;
 
@@ -28,8 +33,9 @@ pub(super) fn expand_delegated_type_decl(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
     leading_comments: &[Comment],
+    resolve_constant: &impl Fn(&Node<'_>) -> Option<Vec<(String, Literal)>>,
 ) -> IngestResult<Option<Vec<ModelBodyItem>>> {
-    let Some(decl) = parse_declaration(call, file)? else {
+    let Some(decl) = parse_declaration(call, file, resolve_constant)? else {
         return Ok(None);
     };
     Ok(Some(expand(decl, leading_comments)))
@@ -51,6 +57,7 @@ struct Declaration {
 fn parse_declaration(
     call: &ruby_prism::CallNode<'_>,
     file: &str,
+    resolve_constant: &impl Fn(&Node<'_>) -> Option<Vec<(String, Literal)>>,
 ) -> IngestResult<Option<Declaration>> {
     if call.receiver().is_some() || constant_id_str(&call.name()) != "delegated_type" {
         return Ok(None);
@@ -151,7 +158,7 @@ fn parse_declaration(
     let Some(types_node) = types_node else {
         return Ok(None);
     };
-    let Some(types) = class_type_list(&types_node) else {
+    let Some(types) = class_type_list(&types_node, resolve_constant) else {
         return Ok(None);
     };
     if types.is_empty() {
@@ -183,17 +190,46 @@ fn parse_declaration(
     }))
 }
 
-fn class_type_list(node: &Node<'_>) -> Option<Vec<String>> {
-    let arr = node.as_array_node()?;
-    let mut types = Vec::new();
-    for el in arr.elements().iter() {
-        let name = symbol_or_string_value(&el)?;
-        if !is_class_name(&name) {
-            return None;
+fn class_type_list(
+    node: &Node<'_>,
+    resolve_constant: &impl Fn(&Node<'_>) -> Option<Vec<(String, Literal)>>,
+) -> Option<Vec<String>> {
+    // `%w[…].freeze` / `TYPES.freeze` — the list is the receiver.
+    if let Some(call) = node.as_call_node() {
+        if constant_id_str(&call.name()) == "freeze"
+            && call.arguments().is_none()
+            && call.block().is_none()
+        {
+            if let Some(recv) = call.receiver() {
+                return class_type_list(&recv, resolve_constant);
+            }
         }
-        types.push(name);
     }
-    Some(types)
+    if let Some(arr) = node.as_array_node() {
+        let mut types = Vec::new();
+        for el in arr.elements().iter() {
+            let name = symbol_or_string_value(&el)?;
+            if !is_class_name(&name) {
+                return None;
+            }
+            types.push(name);
+        }
+        return Some(types);
+    }
+    // `TYPES` / `Leafable::TYPES` — fail closed unless every folded
+    // label is a class name (enum constants reuse the same fold).
+    if node.as_constant_read_node().is_some() || node.as_constant_path_node().is_some() {
+        let mapping = resolve_constant(node)?;
+        let mut types = Vec::new();
+        for (label, _) in mapping {
+            if !is_class_name(&label) {
+                return None;
+            }
+            types.push(label);
+        }
+        return Some(types);
+    }
+    None
 }
 
 fn is_class_name(s: &str) -> bool {

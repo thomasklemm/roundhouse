@@ -1,6 +1,7 @@
 //! `delegated_type :role, types: …` as a general Active Record pattern.
-//! Documented options (`types:`, `dependent: :destroy`, `foreign_key`,
-//! `foreign_type`, `primary_key`, `optional:`) — not a named-app spelling.
+//! Documented options (`types:` as literal or compile-time constant,
+//! `dependent: :destroy`, `foreign_key`, `foreign_type`, `primary_key`,
+//! `optional:`) — not a named-app spelling.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -219,6 +220,82 @@ fn optional_and_dependent_destroy_ingest() {
     )));
 }
 
+/// Same-class `TYPES = %w[…]` folds like a literal list.
+#[test]
+fn class_constant_types_ingest_convenience_names() {
+    let app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/entry.rb",
+            "class Entry < ApplicationRecord\n  TYPES = %w[ Message Comment ]\n  delegated_type :entryable, types: TYPES, dependent: :destroy\nend\n",
+        ),
+        (
+            "app/models/message.rb",
+            "class Message < ApplicationRecord\n  has_one :entry, as: :entryable\nend\n",
+        ),
+        (
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n  has_one :entry, as: :entryable\nend\n",
+        ),
+    ]))
+    .expect("ingest");
+    let inst = instance_names(&app, "Entry");
+    for name in ["message?", "comment?", "destroy_entryable"] {
+        assert!(inst.iter().any(|n| n == name), "{name} missing from {inst:?}");
+    }
+}
+
+/// Concern-module constant `Entryable::TYPES` (Writebook's `Leafable::TYPES`
+/// shape) — fail closed unless the constant folds at ingest.
+#[test]
+fn concern_constant_types_ingest_convenience_names() {
+    let app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", SCHEMA),
+        (
+            "app/models/concerns/entryable.rb",
+            "module Entryable\n  extend ActiveSupport::Concern\n  TYPES = %w[ Message Comment ]\n  included do\n    has_one :entry, as: :entryable\n  end\nend\n",
+        ),
+        (
+            "app/models/entry.rb",
+            "class Entry < ApplicationRecord\n  delegated_type :entryable, types: Entryable::TYPES, dependent: :destroy\nend\n",
+        ),
+        (
+            "app/models/message.rb",
+            "class Message < ApplicationRecord\n  include Entryable\nend\n",
+        ),
+        (
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n  include Entryable\nend\n",
+        ),
+    ]))
+    .expect("ingest");
+    let inst = instance_names(&app, "Entry");
+    for name in ["message?", "comment?", "message", "comment", "entryable_class", "entryable_name"] {
+        assert!(inst.iter().any(|n| n == name), "{name} missing from {inst:?}");
+    }
+    let sc = scopes(&app, "Entry");
+    assert!(sc.iter().any(|n| n == "messages"), "{sc:?}");
+    let entry = app.models.iter().find(|m| m.name.0.as_str() == "Entry").unwrap();
+    let assoc = entry.associations().next().expect("belongs_to");
+    let Association::BelongsTo {
+        polymorphic_targets,
+        ..
+    } = assoc
+    else {
+        panic!("{assoc:?}");
+    };
+    let names: Vec<&str> = polymorphic_targets.iter().map(|t| t.0.as_str()).collect();
+    assert_eq!(names, vec!["Message", "Comment"]);
+}
+
+/// An unresolvable `types:` constant stays unexpanded (fail closed).
+#[test]
+fn unresolvable_types_constant_stays_unexpanded() {
+    let app = entry_app("  delegated_type :entryable, types: Missing::TYPES\n");
+    let inst = instance_names(&app, "Entry");
+    assert!(!inst.iter().any(|n| n == "message?"), "{inst:?}");
+}
+
 /// A concern `included do` carries the same expansion onto the includer.
 #[test]
 fn included_do_delegated_type_ingests() {
@@ -389,6 +466,119 @@ puts "delegated_type namespaced optional passed"
 "#,
         )
         .assert_passes();
+}
+
+#[test]
+fn emitted_concern_constant_types_runs() {
+    runtime_app()
+        .write(
+            "db/schema.rb",
+            r#"ActiveRecord::Schema.define do
+  create_table "entries", force: :cascade do |t|
+    t.string "entryable_type"
+    t.integer "entryable_id"
+  end
+  create_table "messages", force: :cascade do |t|
+    t.string "subject"
+  end
+  create_table "comments", force: :cascade do |t|
+    t.string "content"
+  end
+end
+"#,
+        )
+        .write(
+            "app/models/concerns/entryable.rb",
+            "module Entryable\n  extend ActiveSupport::Concern\n  TYPES = %w[ Message Comment ]\nend\n",
+        )
+        .write(
+            "app/models/entry.rb",
+            "class Entry < ApplicationRecord\n  delegated_type :entryable, types: Entryable::TYPES, dependent: :destroy\nend\n",
+        )
+        .write(
+            "app/models/message.rb",
+            "class Message < ApplicationRecord\n  has_one :entry, as: :entryable, dependent: :destroy\nend\n",
+        )
+        .write(
+            "app/models/comment.rb",
+            "class Comment < ApplicationRecord\n  has_one :entry, as: :entryable, dependent: :destroy\nend\n",
+        )
+        .run_ruby(
+            r#"
+msg = Message.create!(subject: "hello")
+entry = Entry.create!(entryable: msg)
+raise "predicate" unless entry.message?
+raise "typed reader" unless entry.message.subject == "hello"
+raise "types" unless Entry.entryable_types == ["Message", "Comment"]
+c = Comment.create!(content: "hi")
+entry.entryable = c
+raise "reassign" unless entry.comment?
+entry.destroy
+raise "dependent destroy" if Comment.find_by(id: c.id)
+puts "delegated_type concern-constant types passed"
+"#,
+        )
+        .assert_passes();
+}
+
+/// Writebook-shaped `Leafable::TYPES` on Leaf/Edit — fixture coverage only;
+/// abstract overlays above are the support claim.
+#[test]
+fn writebook_leafable_types_shape_ingests() {
+    let schema = r#"ActiveRecord::Schema.define(version: 1) do
+  create_table :leaves do |t|
+    t.string :leafable_type
+    t.integer :leafable_id
+    t.integer :book_id
+  end
+  create_table :edits do |t|
+    t.string :leafable_type
+    t.integer :leafable_id
+    t.integer :leaf_id
+  end
+  create_table :pages do |t|; end
+  create_table :sections do |t|; end
+  create_table :pictures do |t|; end
+  create_table :books do |t|; end
+end
+"#;
+    let app = ingest_app_from_tree(tree(&[
+        ("db/schema.rb", schema),
+        (
+            "app/models/leafable.rb",
+            "module Leafable\n  extend ActiveSupport::Concern\n  TYPES = %w[ Page Section Picture ]\n  included do\n    has_one :leaf, as: :leafable\n  end\nend\n",
+        ),
+        (
+            "app/models/leaf.rb",
+            "class Leaf < ApplicationRecord\n  belongs_to :book\n  delegated_type :leafable, types: Leafable::TYPES, dependent: :destroy\nend\n",
+        ),
+        (
+            "app/models/edit.rb",
+            "class Edit < ApplicationRecord\n  belongs_to :leaf\n  delegated_type :leafable, types: Leafable::TYPES\nend\n",
+        ),
+        (
+            "app/models/page.rb",
+            "class Page < ApplicationRecord\n  include Leafable\nend\n",
+        ),
+        (
+            "app/models/section.rb",
+            "class Section < ApplicationRecord\n  include Leafable\nend\n",
+        ),
+        (
+            "app/models/picture.rb",
+            "class Picture < ApplicationRecord\n  include Leafable\nend\n",
+        ),
+        ("app/models/book.rb", "class Book < ApplicationRecord\nend\n"),
+    ]))
+    .expect("ingest");
+    for model in ["Leaf", "Edit"] {
+        let inst = instance_names(&app, model);
+        for name in ["page?", "section?", "picture?", "leafable_class", "leafable_name"] {
+            assert!(inst.iter().any(|n| n == name), "{model}.{name} missing from {inst:?}");
+        }
+    }
+    let leaf = instance_names(&app, "Leaf");
+    assert!(leaf.iter().any(|n| n == "destroy_leafable"), "{leaf:?}");
 }
 
 #[test]
