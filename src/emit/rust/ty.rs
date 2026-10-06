@@ -92,6 +92,15 @@ pub fn rust_ty(ty: &Ty) -> String {
     }
 }
 
+/// True when this Ty renders as `serde_json::Value` — RBS `untyped`,
+/// unresolved vars, records, and heterogeneous unions (including the
+/// schema-column `String | Integer | Float | bool | nil` used by
+/// `optional_value_attr`). Callers that emit Ruby `nil?` / `to_s` must
+/// use Value methods (`is_null`, `ruby_to_s`), not Option/`to_string`.
+pub(crate) fn rust_ty_is_json_value(ty: &Ty) -> bool {
+    rust_ty(ty) == "serde_json::Value"
+}
+
 fn option_shape(variants: &[Ty]) -> Option<String> {
     if variants.len() != 2 {
         return None;

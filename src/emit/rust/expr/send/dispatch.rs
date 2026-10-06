@@ -320,13 +320,15 @@ pub(super) fn dispatch_method_by_recv_ty(
             "to_i" if args.is_empty() => Some(recv_s.to_string()),
             _ => None,
         },
-        Some(Ty::Untyped) | Some(Ty::Record { .. }) => match method {
+        Some(ty) if crate::emit::rust::ty::rust_ty_is_json_value(ty) => match method {
             "to_s" if args.is_empty() => {
                 // `recv_s` is already wrap-aware via `emit_send_recv`
                 // at the top of this function: non-primary recvs
                 // (e.g. `x.len() as i64`) get the bit-driven wrap,
                 // primary recvs (method chains, var reads) stay bare.
                 // `.ruby_to_s()` itself is a method call — primary.
+                // Covers `untyped`, Record, and heterogeneous unions
+                // that rust_ty renders as `serde_json::Value`.
                 Some(format!("{recv_s}.ruby_to_s()"))
             }
             _ => None,
