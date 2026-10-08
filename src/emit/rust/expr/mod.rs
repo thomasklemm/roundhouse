@@ -59,6 +59,28 @@ fn is_rebound_var(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn emit_view_const_path(path: &[crate::ident::Symbol]) -> Option<String> {
+    if path
+        .first()
+        .is_none_or(|segment| segment.as_str() != "Views")
+    {
+        return None;
+    }
+    let view_path = path
+        .iter()
+        .skip(1)
+        .flat_map(|segment| segment.as_str().split("::"))
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let view = view_path.last()?;
+    let module = crate::naming::snake_case(view);
+    Some(format!(
+        "crate::views::{}::{}",
+        util::escape_rust_keyword(&module),
+        util::escape_rust_keyword(view),
+    ))
+}
+
 pub(super) fn mark_rebound_var(name: &str) {
     let ctx = current_emit_ctx().expect("mark_rebound_var called outside with_emit_ctx");
     ctx.rebound_vars.borrow_mut().insert(name.to_string());
@@ -950,6 +972,11 @@ fn emit_expr_inner(e: &Expr) -> String {
             }
         }
         ExprNode::Const { path } => {
+            // View directory constants lower to leaf-named files under
+            // `views/`, rather than Rust associated-type namespaces.
+            if let Some(view_path) = emit_view_const_path(path) {
+                return view_path;
+            }
             // Rust uses file-as-module — `ActiveSupport::HashWithIndifferentAccess`
             // in source becomes `crate::hash_with_indifferent_access::
             // HashWithIndifferentAccess` at import time, while in-file
@@ -1478,4 +1505,31 @@ pub(super) fn with_closure_vars_scope<R>(body: &Expr, f: impl FnOnce() -> R) -> 
     let result = with_current_return_ty(None, || with_declared_vars_scope(f));
     *ctx.mut_vars.borrow_mut() = mut_snapshot;
     result
+}
+
+#[cfg(test)]
+mod view_const_tests {
+    use super::emit_view_const_path;
+    use crate::ident::Symbol;
+
+    fn path(parts: &[&str]) -> Vec<Symbol> {
+        parts.iter().map(|part| Symbol::from(*part)).collect()
+    }
+
+    #[test]
+    fn nested_view_const_resolves_to_its_rust_view_module() {
+        assert_eq!(
+            emit_view_const_path(&path(&["Views", "Accounts", "Bots"])),
+            Some("crate::views::bots::Bots".to_string()),
+        );
+    }
+
+    #[test]
+    fn deeply_nested_view_const_uses_leaf_and_non_view_paths_are_untouched() {
+        assert_eq!(
+            emit_view_const_path(&path(&["Views", "Users", "Sidebars", "Rooms"])),
+            Some("crate::views::rooms::Rooms".to_string()),
+        );
+        assert_eq!(emit_view_const_path(&path(&["Accounts::Bots"])), None);
+    }
 }

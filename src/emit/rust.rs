@@ -825,7 +825,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         // this fn handles the remaining registry-independent bits —
         // parens, str_color, last_use.)
         if !app_lcs.is_empty() {
-            files.extend(emit_app_library_classes(&app_lcs));
+            files.extend(emit_app_library_classes(
+                &app_lcs,
+                &app.current_attribute_classes,
+            ));
         }
         if !model_lcs.is_empty() {
             for lc in &model_lcs {
@@ -2254,7 +2257,10 @@ fn emit_lib_rs(emitted: &[EmittedFile]) -> EmittedFile {
     }
 }
 
-fn emit_app_library_classes(lcs: &[crate::dialect::LibraryClass]) -> Vec<EmittedFile> {
+fn emit_app_library_classes(
+    lcs: &[crate::dialect::LibraryClass],
+    current_attribute_classes: &[crate::ident::ClassId],
+) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     let mut entries = Vec::new();
     for lc in lcs {
@@ -2265,7 +2271,10 @@ fn emit_app_library_classes(lcs: &[crate::dialect::LibraryClass]) -> Vec<Emitted
             .map(crate::naming::underscore)
             .collect::<Vec<_>>()
             .join("/");
-        let body = match library::emit_library_class(lc) {
+        let body = match library::emit_library_class_with_current_attributes(
+            lc,
+            current_attribute_classes.contains(&lc.name),
+        ) {
             Ok(body) => body,
             Err(err) => emit_failure_stub(&format!("app class `{raw}`"), &err),
         };
@@ -2481,7 +2490,7 @@ mod nested_module_emit_tests {
         )
         .expect("app support classes ingest");
         let files = crate::emit::rust::expr::with_emit_ctx(super::EmitCtx::default(), || {
-            emit_app_library_classes(&classes)
+            emit_app_library_classes(&classes, &[])
         });
         let current = files
             .iter()
@@ -2489,7 +2498,9 @@ mod nested_module_emit_tests {
             .expect("Current source");
         let helper = files
             .iter()
-            .find(|file| file.path.to_string_lossy() == "src/app_classes/application_helper_class.rs")
+            .find(|file| {
+                file.path.to_string_lossy() == "src/app_classes/application_helper_class.rs"
+            })
             .expect("ApplicationHelper source");
         let modules = files
             .iter()
@@ -2499,7 +2510,11 @@ mod nested_module_emit_tests {
         assert!(current.content.contains("pub struct Current"));
         assert!(helper.content.contains("pub struct ApplicationHelper"));
         assert!(helper.content.contains("use crate::app_classes::*;"));
-        assert!(modules.content.contains("pub mod application_helper_class;"));
+        assert!(
+            modules
+                .content
+                .contains("pub mod application_helper_class;")
+        );
         assert!(
             modules
                 .content

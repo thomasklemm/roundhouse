@@ -89,6 +89,45 @@ pub fn emit_module(methods: &[MethodDef]) -> Result<String, String> {
 /// Subsequent commits drive the per-ExprNode body emit until the
 /// produced Rust is `cargo check`-clean.
 pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
+    emit_library_class_with_current_attributes(class, false)
+}
+
+pub(super) fn emit_library_class_with_current_attributes(
+    source_class: &LibraryClass,
+    is_current_attributes: bool,
+) -> Result<String, String> {
+    // CurrentAttributes exposes its instance methods through generated
+    // class-level forwarders. Rust cannot have an inherent associated
+    // function and an instance method with the same name, so retain the
+    // stateful implementation under a private, distinct name and route
+    // the generated forwarders to it. This is intentionally scoped to
+    // classes identified by ingest metadata, not inferred from names.
+    let class = if is_current_attributes {
+        let mut class = source_class.clone();
+        let instance_names: std::collections::HashSet<String> = class
+            .methods
+            .iter()
+            .filter(|m| matches!(m.receiver, MethodReceiver::Instance))
+            .map(|m| m.name.as_str().to_string())
+            .collect();
+        for method in &mut class.methods {
+            if method.receiver == MethodReceiver::Instance {
+                method.name =
+                    crate::ident::Symbol::from(current_instance_method_name(method.name.as_str()));
+            }
+            rewrite_current_forwarder_calls(&mut method.body, &instance_names);
+        }
+        class
+    } else {
+        source_class.clone()
+    };
+    emit_library_class_inner(&class, is_current_attributes)
+}
+
+fn emit_library_class_inner(
+    class: &LibraryClass,
+    is_current_attributes: bool,
+) -> Result<String, String> {
     // Strip the namespace prefix (`ActiveSupport::HashWithIndifferentAccess`
     // → `HashWithIndifferentAccess`). Rust uses file-as-module, so the
     // namespace is carried by the file path, not the struct name.
@@ -131,6 +170,7 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
         .iter()
         .filter(|m| {
             matches!(m.receiver, MethodReceiver::Instance)
+                && !is_current_attributes
                 && m.name.as_str() != "initialize"
                 && !method_reads_self(&m.body)
                 // Abstract-stub bodies (just `raise NotImplementedError`)
@@ -277,6 +317,71 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     }
     out.push_str("}\n");
     Ok(out)
+}
+
+fn current_instance_method_name(name: &str) -> String {
+    let rust_name = if let Some(base) = name.strip_suffix('=') {
+        format!("set_{base}")
+    } else {
+        super::expr::sanitize_ident(name)
+    };
+    format!("__current_instance_{rust_name}")
+}
+
+fn rewrite_current_forwarder_calls(
+    expr: &mut Expr,
+    instance_names: &std::collections::HashSet<String>,
+) {
+    if let ExprNode::Send { method, .. } = &mut *expr.node {
+        if instance_names.contains(method.as_str()) {
+            *method = crate::ident::Symbol::from(current_instance_method_name(method.as_str()));
+        }
+    }
+    expr.node
+        .for_each_child_mut(&mut |child| rewrite_current_forwarder_calls(child, instance_names));
+}
+
+#[cfg(test)]
+mod current_attributes_emit_tests {
+    use super::emit_library_class_with_current_attributes;
+
+    #[test]
+    fn current_attributes_forwards_class_apis_to_distinct_stateful_methods() {
+        let classes = crate::ingest::ingest_library_classes(
+            b"class Current\n  def user\n    @user\n  end\n  def user=(value)\n    @user = value\n  end\n  def account\n    Account.first\n  end\n  def self.user\n    Current.instance.user\n  end\n  def self.set_user(value)\n    Current.instance.user = value\n  end\n  def self.account\n    Current.instance.account\n  end\nend\n",
+            "current.rb",
+        )
+        .expect("Current class ingests");
+        let emitted =
+            crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+                emit_library_class_with_current_attributes(&classes[0], true).expect("emits")
+            });
+
+        assert!(
+            emitted.contains("pub fn user()"),
+            "class API is static:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("pub fn set_user("),
+            "writer API is static:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("pub fn __current_instance_user(&self)"),
+            "instance state accessor remains stateful:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("Current::instance().__current_instance_user()"),
+            "forwarder reaches the per-thread instance accessor:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("pub fn __current_instance_account(&self)"),
+            "custom instance method is retained:\n{emitted}"
+        );
+        assert!(
+            !emitted.contains("pub fn user(&self)"),
+            "associated and instance APIs must not collide:\n{emitted}"
+        );
+    }
 }
 
 /// Module singletons whose state is *per-request render state*, not

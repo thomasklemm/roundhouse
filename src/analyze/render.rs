@@ -58,7 +58,20 @@ pub(super) fn extract_partial_render_sites(
                     targets.push(partial_name.clone());
                     let entry = out.entry(partial_name).or_default();
                     for (k, v) in locals {
-                        entry.insert(k, v);
+                        // One partial may be rendered from both well-typed
+                        // and gradual sites. Keep useful evidence when a
+                        // later site only knows `Untyped`/an inference var;
+                        // otherwise traversal order silently erases the
+                        // concrete record type used to type the partial.
+                        match entry.get(&k) {
+                            Some(existing) if !existing.is_unknown() && v.is_unknown() => {}
+                            Some(existing) if existing.is_unknown() && !v.is_unknown() => {
+                                entry.insert(k, v);
+                            }
+                            _ => {
+                                entry.insert(k, v);
+                            }
+                        }
                     }
                 }
             }
