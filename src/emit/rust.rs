@@ -1884,7 +1884,11 @@ fn render_axum_router_body(flat_routes: &[crate::lower::FlatRoute]) -> String {
         let mut verbs = String::new();
         for (i, r) in routes.iter().enumerate() {
             let verb = axum_verb_fn(&r.method);
-            let ctrl_mod = crate::naming::snake_case(r.controller.0.as_str());
+            // Match the module path used when emitting controller files.
+            // `snake_case` leaves `::` in the identifier (`rooms::...`),
+            // while controller LCs are placed using Rails `underscore`
+            // (`rooms/...`).
+            let ctrl_mod = controller_module_path(r.controller.0.as_str());
             let action = r.action.as_str();
             if i == 0 {
                 verbs.push_str(&format!(
@@ -1920,6 +1924,10 @@ fn render_axum_router_body(flat_routes: &[crate::lower::FlatRoute]) -> String {
     );
     let _ = HttpMethod::Get; // silence unused-import lint when no routes
     out
+}
+
+fn controller_module_path(controller: &str) -> String {
+    crate::naming::underscore(controller).replace('/', "::")
 }
 
 /// Rails `/articles/:id` → axum `/articles/{id}` (axum 0.8 path
@@ -2442,10 +2450,18 @@ fn emit_nested_mod_files(
                 } else {
                     format!("{parent}/{module}")
                 };
-                if namespaces.contains(&child) && !(area == "app_classes" && parent.is_empty()) {
+                let namespace_alias = crate::naming::camelize(&module);
+                let collides_with_class = entries.iter().any(|(path, name)| {
+                    path.rsplit_once('/').map(|(p, _)| p).unwrap_or("") == parent
+                        && name == &namespace_alias
+                });
+                if namespaces.contains(&child)
+                    && !(area == "app_classes" && parent.is_empty())
+                    && !collides_with_class
+                {
                     lines.push(format!(
                         "pub use self::{module} as {};",
-                        crate::naming::camelize(&module)
+                        namespace_alias
                     ));
                 }
             }
@@ -2480,7 +2496,7 @@ fn emit_nested_mod_files(
 
 #[cfg(test)]
 mod nested_module_emit_tests {
-    use super::{emit_app_library_classes, emit_nested_mod_files};
+    use super::{controller_module_path, emit_app_library_classes, emit_nested_mod_files};
 
     #[test]
     fn emits_app_library_classes_with_a_registered_module_and_cross_class_imports() {
@@ -2581,6 +2597,34 @@ mod nested_module_emit_tests {
                 .content
                 .contains("pub use accounts::bots_controller::BotsController;")
         );
+    }
+
+    #[test]
+    fn namespace_alias_is_omitted_when_it_collides_with_a_class_reexport() {
+        let emitted = emit_nested_mod_files(
+            "app_classes",
+            &[
+                ("opengraph/fetch/document".into(), "FetchContents".into()),
+                ("opengraph/fetch_class".into(), "Fetch".into()),
+            ],
+            true,
+            true,
+        );
+        let namespace = emitted
+            .iter()
+            .find(|file| file.path.to_string_lossy() == "src/app_classes/opengraph/mod.rs")
+            .unwrap();
+
+        assert!(namespace.content.contains("pub mod fetch;"));
+        assert!(namespace.content.contains("pub use fetch_class::Fetch;"));
+        assert!(!namespace.content.contains("pub use self::fetch as Fetch;"));
+    }
+
+    #[test]
+    fn controller_route_module_path_matches_nested_controller_file_layout() {
+        assert_eq!(controller_module_path("Rooms::SettingsController"), "rooms::settings_controller");
+        assert_eq!(controller_module_path("Rails::HealthController"), "rails::health_controller");
+        assert_eq!(controller_module_path("RoomsController"), "rooms_controller");
     }
 }
 

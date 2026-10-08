@@ -49,7 +49,7 @@ pub(super) fn extract_partial_render_sites(
         ExprNode::Send { recv, method, args, block, .. } => {
             // Detect the `render` call shape (no explicit receiver, or the
             // receiver is an implicit context — Rails makes both work).
-            if recv.is_none() && method.as_str() == "render" {
+            if is_implicit_render_receiver(recv.as_ref()) && method.as_str() == "render" {
                 if let Some((partial_name, locals)) = interpret_render_call(args, current_view) {
                     // Record the renderer→partial edge so the caller can
                     // propagate the renderer's ivar context to the partial
@@ -142,6 +142,17 @@ pub(super) fn extract_partial_render_sites(
             }
         }
         _ => {}
+    }
+}
+
+/// Rails templates use both `render(...)` and `self.render(...)`. The
+/// latter is still the view-context render API; treating every receiver as
+/// an unrelated object silently drops its partial-local type evidence.
+fn is_implicit_render_receiver(recv: Option<&Expr>) -> bool {
+    match recv.map(|r| &*r.node) {
+        None => true,
+        Some(ExprNode::Var { name, .. }) => name.as_str() == "self",
+        _ => false,
     }
 }
 
@@ -415,5 +426,90 @@ pub(super) fn resolve_partial_path(name: &str, current_view: &Symbol) -> String 
             Some(idx) => format!("{}_{}", &current[..=idx], name),
             None => format!("_{name}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_self_render_contributes_partial_local_type_evidence() {
+        let user_ty = Ty::Class {
+            id: crate::ident::ClassId(Symbol::from("Accounts::User")),
+            args: vec![],
+        };
+        let sym = |s: &str| Expr::new(
+            Default::default(),
+            ExprNode::Lit { value: Literal::Sym { value: Symbol::from(s) } },
+        );
+        let str_lit = |s: &str| Expr::new(
+            Default::default(),
+            ExprNode::Lit { value: Literal::Str { value: s.to_string() } },
+        );
+        let mut local_value = Expr::new(
+            Default::default(),
+            ExprNode::Var { id: crate::ident::VarId(0), name: Symbol::from("account_user") },
+        );
+        local_value.ty = Some(user_ty.clone());
+        let locals = Expr::new(
+            Default::default(),
+            ExprNode::Hash {
+                entries: vec![(sym("user"), local_value)],
+                kwargs: false,
+            },
+        );
+        let kwargs = Expr::new(
+            Default::default(),
+            ExprNode::Hash {
+                entries: vec![(sym("partial"), str_lit("users/user")), (sym("locals"), locals)],
+                kwargs: true,
+            },
+        );
+        let receiver = Expr::new(
+            Default::default(),
+            ExprNode::Var { id: crate::ident::VarId(1), name: Symbol::from("self") },
+        );
+        let render = Expr::new(
+            Default::default(),
+            ExprNode::Send {
+                recv: Some(receiver),
+                method: Symbol::from("render"),
+                args: vec![kwargs],
+                block: None,
+                parenthesized: true,
+            },
+        );
+
+        let mut sites = HashMap::new();
+        let mut targets = Vec::new();
+        extract_partial_render_sites(
+            &render,
+            &Symbol::from("accounts/show"),
+            &mut sites,
+            &mut targets,
+        );
+        assert_eq!(targets, [Symbol::from("users/_user")]);
+        assert_eq!(sites[&Symbol::from("users/_user")][&Symbol::from("user")], user_ty);
+
+        // Carry the extracted fact through the actual view lowerer: this
+        // catches regressions where render collection works but the
+        // partial's emitted signature still falls back to an unknown type.
+        let view_name = Symbol::from("users/_user");
+        let view = crate::dialect::View {
+            name: view_name.clone(),
+            format: Symbol::from("html"),
+            locals: Default::default(),
+            body: Expr::new(Default::default(), ExprNode::Lit { value: Literal::Nil }),
+            strict_locals: Some(vec![crate::dialect::Param::positional(Symbol::from("user"))]),
+            analysis_only: false,
+            jbuilder: false,
+        };
+        let mut app = crate::App::default();
+        app.partial_local_types = sites;
+        let lowered = crate::lower::view_to_library::lower_view_to_library_class(&view, &app);
+        let signature = lowered.methods[0].signature.as_ref().expect("partial signature");
+        let Ty::Fn { params, .. } = signature else { panic!("expected function signature") };
+        assert_eq!(params[0].ty, user_ty);
     }
 }
