@@ -72,11 +72,14 @@ fn emit_view_const_path(path: &[crate::ident::Symbol]) -> Option<String> {
         .flat_map(|segment| segment.as_str().split("::"))
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
-    let view = view_path.last()?;
-    let module = crate::naming::snake_case(view);
+    let view = *view_path.last()?;
+    let modules = view_path
+        .iter()
+        .map(|segment| util::escape_rust_keyword(&crate::naming::snake_case(segment)))
+        .collect::<Vec<_>>()
+        .join("::");
     Some(format!(
-        "crate::views::{}::{}",
-        util::escape_rust_keyword(&module),
+        "crate::views::{modules}::{}",
         util::escape_rust_keyword(view),
     ))
 }
@@ -650,6 +653,10 @@ pub(super) fn global_class_method_params(
             .as_ref()
             .and_then(|ctx| ctx.lookup_params(class, method))
     })
+}
+
+pub(super) fn global_helper_method(name: &str) -> Option<crate::emit::rust::ctx::GlobalHelperMethod> {
+    current_emit_ctx().and_then(|ctx| ctx.global_helper_methods.get(name).cloned())
 }
 
 fn in_constructor() -> bool {
@@ -1508,28 +1515,73 @@ pub(super) fn with_closure_vars_scope<R>(body: &Expr, f: impl FnOnce() -> R) -> 
 }
 
 #[cfg(test)]
-mod view_const_tests {
-    use super::emit_view_const_path;
-    use crate::ident::Symbol;
+mod tests {
+    use super::{emit_expr, emit_view_const_path, with_emit_ctx};
+    use crate::emit::rust::ctx::EmitCtx;
+    use crate::expr::{Expr, ExprNode, LValue, Literal};
+    use crate::ident::{Symbol, VarId};
+    use crate::span::Span;
 
     fn path(parts: &[&str]) -> Vec<Symbol> {
         parts.iter().map(|part| Symbol::from(*part)).collect()
     }
 
     #[test]
-    fn nested_view_const_resolves_to_its_rust_view_module() {
+    fn nested_view_const_resolves_to_its_full_rust_view_module_path() {
         assert_eq!(
             emit_view_const_path(&path(&["Views", "Accounts", "Bots"])),
-            Some("crate::views::bots::Bots".to_string()),
+            Some("crate::views::accounts::bots::Bots".to_string()),
         );
     }
 
     #[test]
     fn deeply_nested_view_const_uses_leaf_and_non_view_paths_are_untouched() {
         assert_eq!(
+            emit_view_const_path(&path(&["Views", "Accounts"])),
+            Some("crate::views::accounts::Accounts".to_string()),
+        );
+        assert_eq!(
             emit_view_const_path(&path(&["Views", "Users", "Sidebars", "Rooms"])),
-            Some("crate::views::rooms::Rooms".to_string()),
+            Some("crate::views::users::sidebars::rooms::Rooms".to_string()),
+        );
+        assert_eq!(
+            emit_view_const_path(&path(&["Views", "Users"])),
+            Some("crate::views::users::Users".to_string()),
         );
         assert_eq!(emit_view_const_path(&path(&["Accounts::Bots"])), None);
+    }
+
+    #[test]
+    fn rust_keyword_local_is_escaped_in_its_declaration_and_reads() {
+        let span = Span::default();
+        let assign = Expr::new(
+            span,
+            ExprNode::Assign {
+                target: LValue::Var {
+                    id: VarId(0),
+                    name: Symbol::from("type"),
+                },
+                value: Expr::new(
+                    span,
+                    ExprNode::Lit {
+                        value: Literal::Int { value: 7 },
+                    },
+                ),
+            },
+        );
+        let read = Expr::new(
+            span,
+            ExprNode::Var {
+                id: VarId(0),
+                name: Symbol::from("type"),
+            },
+        );
+
+        with_emit_ctx(EmitCtx::default(), || {
+            assert_eq!(
+                format!("{}\n{}", emit_expr(&assign), emit_expr(&read)),
+                "let r#type = 7_i64\nr#type",
+            );
+        });
     }
 }

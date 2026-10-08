@@ -10,7 +10,7 @@
 
 use crate::expr::{Expr, ExprNode};
 
-use super::super::util::peel_nil;
+use super::super::util::{escape_rust_keyword, peel_nil};
 use super::super::{emit_expr, in_constructor, ivar_field_ty};
 use super::coerce::coerce_arg_for_field_ty;
 
@@ -41,7 +41,36 @@ pub(super) fn try_constructor_field_assign(
         Some(fty) => coerce_arg_for_field_ty(&args[0], &fty),
         None => emit_expr(&args[0]),
     };
-    Some(format!("let {field} = {rhs}"))
+    Some(format!("let {} = {rhs}", escape_rust_keyword(field)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::try_constructor_field_assign;
+    use crate::emit::rust::ctx::EmitCtx;
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::span::Span;
+
+    #[test]
+    fn constructor_field_assignment_escapes_rust_keywords() {
+        let span = Span::default();
+        let receiver = Expr::new(span, ExprNode::SelfRef);
+        let value = Expr::new(
+            span,
+            ExprNode::Lit {
+                value: Literal::Int { value: 1 },
+            },
+        );
+
+        crate::emit::rust::expr::with_emit_ctx(EmitCtx::default(), || {
+            crate::emit::rust::expr::with_constructor_mode(vec![], || {
+                assert_eq!(
+                    try_constructor_field_assign(Some(&receiver), "type=", &[value]),
+                    Some("let r#type = 1_i64".to_string()),
+                );
+            });
+        });
+    }
 }
 
 /// Stdlib class-method bridges: `Time.now`, `JSON.generate`,

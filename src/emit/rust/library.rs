@@ -213,6 +213,14 @@ fn emit_library_class_inner(
 
     let mut out = String::new();
 
+    // CurrentAttributes is request-local state, not an entry in an
+    // untyped Thread hash. Class-level accessors borrow this typed slot.
+    if is_current_attributes {
+        writeln!(out, "thread_local! {{").unwrap();
+        writeln!(out, "    static __CURRENT_ATTRIBUTES_{name}: std::cell::RefCell<Option<{name}>> = const {{ std::cell::RefCell::new(None) }};").unwrap();
+        writeln!(out, "}}\n").unwrap();
+    }
+
     // Struct declaration. Derive `Clone` because Ruby semantics treat
     // model instances as freely cloneable (every assignment and
     // method-call argument-pass implicitly copies a reference, and
@@ -256,6 +264,14 @@ fn emit_library_class_inner(
     // instance methods use.
     writeln!(out, "impl {name} {{").unwrap();
     let mut first = true;
+    if is_current_attributes
+        && !class
+            .methods
+            .iter()
+            .any(|method| method.name.as_str() == "initialize")
+    {
+        writeln!(out, "    pub fn new() -> Self {{ Self::default() }}\n").unwrap();
+    }
     // Make this class's ivar → field-type table available to
     // `emit_assign` (via thread-local) so RHS values can be coerced
     // when their Ty doesn't match the declared field type — most
@@ -272,16 +288,20 @@ fn emit_library_class_inner(
                         writeln!(out).unwrap();
                     }
                     first = false;
-                    let body = match m.receiver {
-                        MethodReceiver::Class => {
-                            // `def self.X` → `pub fn X(...)` with no receiver.
-                            // Module-style call from within the impl block.
-                            super::method::emit_module_method(m)?
-                        }
-                        MethodReceiver::Instance => {
-                            let is_static = static_method_names.contains(m.name.as_str());
-                            let mutates = mutating_methods.contains(m.name.as_str());
-                            emit_instance_method(m, mutates, is_static, &name, &ivars)?
+                    let body = if is_current_attributes {
+                        emit_current_attributes_method(m, &class.methods, &name, &ivars)?
+                    } else {
+                        match m.receiver {
+                            MethodReceiver::Class => {
+                                // `def self.X` → `pub fn X(...)` with no receiver.
+                                // Module-style call from within the impl block.
+                                super::method::emit_module_method(m)?
+                            }
+                            MethodReceiver::Instance => {
+                                let is_static = static_method_names.contains(m.name.as_str());
+                                let mutates = mutating_methods.contains(m.name.as_str());
+                                emit_instance_method(m, mutates, is_static, &name, &ivars)?
+                            }
                         }
                     };
                     for line in body.lines() {
@@ -328,6 +348,81 @@ fn current_instance_method_name(name: &str) -> String {
     format!("__current_instance_{rust_name}")
 }
 
+fn emit_current_attributes_method(
+    method: &MethodDef,
+    methods: &[MethodDef],
+    class_name: &str,
+    ivars: &[(String, Ty)],
+) -> Result<String, String> {
+    if method.receiver != MethodReceiver::Class {
+        let mut rendered = super::method::emit_instance_method(
+            method,
+            method.mutates_self,
+            false,
+            class_name,
+            ivars,
+        )?;
+        if let Some(base) = method.name.as_str().strip_prefix("__current_instance_set_") {
+            if let Some((_, ty)) = ivars.iter().find(|(field, _)| field == base) {
+                rendered = rendered.replace("value: ()", &format!("value: {}", rust_ty(ty)));
+            }
+        }
+        return Ok(rendered);
+    }
+
+    let name = method.name.as_str();
+    if name == "instance" {
+        return Ok(format!(
+            "pub fn instance() -> {class_name} {{\n        __CURRENT_ATTRIBUTES_{class_name}.with(|slot| {{\n            if slot.borrow().is_none() {{ *slot.borrow_mut() = Some({class_name}::new()); }}\n            slot.borrow().as_ref().unwrap().clone()\n        }})\n    }}"
+        ));
+    }
+    if name == "reset" {
+        return Ok(format!(
+            "pub fn reset() {{\n        __CURRENT_ATTRIBUTES_{class_name}.with(|slot| *slot.borrow_mut() = Some({class_name}::new()));\n    }}"
+        ));
+    }
+
+    // The generated Rails class API consists of one class method for each
+    // instance method. Retain the inferred signature, but route it to the
+    // request-local instance instead of cloning Current::instance() (which
+    // would make writes disappear).
+    let target = methods.iter().find(|candidate| {
+        candidate.receiver == MethodReceiver::Instance
+            && (candidate.name.as_str() == current_instance_method_name(name)
+                || name
+                    .strip_prefix("set_")
+                    .map(|base| {
+                        candidate.name.as_str() == current_instance_method_name(&format!("{base}="))
+                    })
+                    .unwrap_or(false))
+    });
+    let Some(target) = target else {
+        return super::method::emit_module_method(method);
+    };
+    let instance_name = target.name.as_str().to_string();
+    let rendered = super::method::emit_module_method(method)?;
+    let (header, _) = rendered
+        .split_once(" {\n")
+        .ok_or_else(|| format!("could not find Rust function body for Current::{name}"))?;
+    let mut out = format!("{header} {{\n        __CURRENT_ATTRIBUTES_{class_name}.with(|slot| {{\n            if slot.borrow().is_none() {{ *slot.borrow_mut() = Some({class_name}::new()); }}\n");
+    let is_writer = name.starts_with("set_");
+    if is_writer {
+        if let Some(base) = name.strip_prefix("set_") {
+            if let Some((_, ty)) = ivars.iter().find(|(field, _)| field == base) {
+                out = out.replace("value: ()", &format!("value: {}", rust_ty(ty)));
+            }
+        }
+    }
+    let call = if is_writer {
+        format!("slot.borrow_mut().as_mut().unwrap().{instance_name}(value);")
+    } else {
+        format!("slot.borrow().as_ref().unwrap().{instance_name}()")
+    };
+    writeln!(out, "            {call}").unwrap();
+    out.push_str("        })\n    }");
+    Ok(out)
+}
+
 fn rewrite_current_forwarder_calls(
     expr: &mut Expr,
     instance_names: &std::collections::HashSet<String>,
@@ -370,8 +465,20 @@ mod current_attributes_emit_tests {
             "instance state accessor remains stateful:\n{emitted}"
         );
         assert!(
-            emitted.contains("Current::instance().__current_instance_user()"),
-            "forwarder reaches the per-thread instance accessor:\n{emitted}"
+            emitted.contains("__CURRENT_ATTRIBUTES_Current.with(|slot|"),
+            "class forwarders use request-local state:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("thread_local!"),
+            "state is thread-local:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("pub fn new() -> Self"),
+            "Current has a constructor for its default state:\n{emitted}"
+        );
+        assert!(
+            emitted.contains("borrow_mut().as_mut().unwrap().__current_instance_set_user(value)"),
+            "writer updates the stored instance:\n{emitted}"
         );
         assert!(
             emitted.contains("pub fn __current_instance_account(&self)"),

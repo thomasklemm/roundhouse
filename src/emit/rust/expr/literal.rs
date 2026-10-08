@@ -361,7 +361,7 @@ pub(super) fn string_interp_fmt_and_args(parts: &[InterpPart]) -> (String, Vec<S
                 // `.ruby_to_s()` is safe even when the body-typer's
                 // annotation imprecisely marks an actually-`&String`
                 // closure param as Untyped.
-                let arg = emit_expr(expr);
+                let arg = emit_string_interp_arg(expr);
                 // Fire on Untyped / Record (method-style; those files
                 // import `RubyToS`) and on other rust_value_shaped
                 // types via UFCS so ActionController compiles without
@@ -394,6 +394,20 @@ pub(super) fn string_interp_fmt_and_args(parts: &[InterpPart]) -> (String, Vec<S
         }
     }
     (fmt, args)
+}
+
+/// A sequence is emitted as Rust statements, which is valid in a method
+/// body but not directly in a `format!`/`write!` argument position. Keep
+/// its evaluation at the interpolation site and make it a block
+/// expression so accumulator/capture setup runs exactly once and before
+/// that value is formatted.
+fn emit_string_interp_arg(expr: &Expr) -> String {
+    let emitted = emit_expr(expr);
+    if matches!(&*expr.node, ExprNode::Seq { .. }) {
+        format!("{{\n{}\n}}", indent(&emitted, 1))
+    } else {
+        emitted
+    }
 }
 
 /// Returns `true` when `expr` is an index/send into a recv whose
@@ -496,10 +510,10 @@ fn emit_regex_literal(pattern: &str, flags: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{emit_closure, emit_literal};
+    use super::{emit_closure, emit_literal, emit_string_interp};
     use crate::emit::rust::EmitCtx;
     use crate::emit::rust::expr::{declare_var, emit_expr, with_emit_ctx};
-    use crate::expr::{BlockStyle, Expr, ExprNode, LValue, Literal};
+    use crate::expr::{BlockStyle, Expr, ExprNode, InterpPart, LValue, Literal};
     use crate::ident::{Symbol, VarId};
     use crate::span::Span;
 
@@ -724,5 +738,19 @@ mod tests {
                 "expected unsupported diagnostic for `{flag}`, got {diags:?}"
             );
         }
+    }
+
+    #[test]
+    fn string_interpolation_wraps_capture_sequence_as_block_expression() {
+        let capture = seq(vec![assign("_cap", int_lit(1)), var("_cap")]);
+        let emitted = with_emit_ctx(EmitCtx::default(), || {
+            emit_string_interp(&[InterpPart::Expr { expr: capture }])
+        });
+
+        assert!(
+            emitted.contains("format!(\"{}\", {\n    let _cap = 1_i64;\n    _cap\n})"),
+            "sequence is a single valid format argument:\n{emitted}"
+        );
+        assert!(!emitted.contains(", let _cap"), "{emitted}");
     }
 }

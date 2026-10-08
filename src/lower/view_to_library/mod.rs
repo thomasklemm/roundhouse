@@ -543,7 +543,17 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         if !arg_name.is_empty() {
             typed.push((
                 arg_name.clone(),
-                record_arg_ty(dir, is_layout, &known_models),
+                if is_layout {
+                    record_arg_ty(dir, true, &known_models)
+                } else {
+                    // A collection's `as:` local (or an explicit local
+                    // passed to a partial) is not necessarily the
+                    // singular of its directory. Prefer the analyzer's
+                    // call-site fact when the convention cannot identify
+                    // the model, without overriding a convention that
+                    // already resolves to a known model.
+                    declared_local_ty(view, &arg_name, &known_models, app)
+                },
             ));
         }
         for iv in &closure_ivars {

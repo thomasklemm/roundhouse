@@ -28,6 +28,13 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ty::{Param, Ty};
 
+#[derive(Clone, Debug)]
+pub struct GlobalHelperMethod {
+    pub path: String,
+    pub params: Vec<Ty>,
+    pub defaults: Vec<Option<String>>,
+}
+
 /// Emit-pipeline state. Built once per `rust::emit` call (in
 /// `collect_global_class_methods`) after every category of
 /// `LibraryClass` has been assembled. Holds the cross-LC dispatch
@@ -71,6 +78,10 @@ pub struct EmitCtx {
     /// over-match would at worst suppress a clone the borrow checker
     /// would then flag loudly, never miscompile silently.
     pub global_mutating_methods: HashSet<String>,
+
+    /// Unique class-method Rails helper owner for bare calls in views and
+    /// app helper bodies. Ambiguous names are omitted during collection.
+    pub global_helper_methods: HashMap<String, GlobalHelperMethod>,
 
     /// Ivar name → declared field type for the class currently being
     /// emitted. Read by `expr/mod.rs::ivar_field_ty` so `emit_assign`

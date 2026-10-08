@@ -199,6 +199,58 @@ pub(super) fn emit_send(
         if method == "raise" && args.len() == 1 {
             return format!("panic!(\"{{}}\", {})", args_s[0]);
         }
+        // Rails view helpers are instance-style Ruby calls in templates
+        // (`image_tag`, `dom_id`, etc.), but their Rust implementations
+        // live as associated functions on the generated ViewHelpers type.
+        // Resolve only methods present in that class registry so unrelated
+        // bare calls keep their existing free-function behavior.
+        if let Some(param_tys) = super::global_class_method_param_tys("ViewHelpers", &effective_method) {
+            let mut helper_args: Vec<String> = args
+                .iter()
+                .enumerate()
+                .map(|(i, arg)| {
+                    param_tys
+                        .get(i)
+                        .map(|param_ty| coerce_arg_for_param_ty(arg, param_ty))
+                        .unwrap_or_else(|| emit_expr(arg))
+                })
+                .collect();
+            for i in helper_args.len()..param_tys.len() {
+                let default = super::global_class_method_param_default("ViewHelpers", &effective_method, i)
+                    .or_else(|| param_tys.get(i).and_then(synth_default_for_ty));
+                match default {
+                    Some(value) => helper_args.push(value),
+                    None => break,
+                }
+            }
+            return format!("ViewHelpers::{rewritten_method}({})", helper_args.join(", "));
+        }
+        if let Some(helper) = super::global_helper_method(&effective_method) {
+            let mut helper_args: Vec<String> = args
+                .iter()
+                .enumerate()
+                .map(|(i, arg)| {
+                    helper
+                        .params
+                        .get(i)
+                        .map(|param_ty| coerce_arg_for_param_ty(arg, param_ty))
+                        .unwrap_or_else(|| emit_expr(arg))
+                })
+                .collect();
+            for i in helper_args.len()..helper.params.len() {
+                let default = helper
+                    .defaults
+                    .get(i)
+                    .cloned()
+                    .flatten()
+                    .or_else(|| helper.params.get(i).and_then(synth_default_for_ty));
+                match default {
+                    Some(value) => helper_args.push(value),
+                    None => break,
+                }
+            }
+            return format!("{}::{rewritten_method}({})", helper.path, helper_args.join(", "));
+        }
         return format!("{}({})", rewritten_method, args_s.join(", "));
     }
     let r = recv.unwrap();
@@ -744,4 +796,29 @@ pub(crate) fn is_array_index_read(arg: &Expr) -> bool {
         && args.len() == 1
         && matches!(r.ty.as_ref(), Some(Ty::Array { .. }))
         && matches!(args[0].ty.as_ref(), Some(Ty::Int))
+}
+
+#[cfg(test)]
+mod helper_dispatch_tests {
+    use super::emit_send;
+    use crate::emit::rust::ctx::{EmitCtx, GlobalHelperMethod};
+
+    #[test]
+    fn a_unique_app_helper_bare_call_uses_its_emitted_owner() {
+        let mut ctx = EmitCtx::default();
+        ctx.global_helper_methods.insert(
+            "translation_button".to_string(),
+            GlobalHelperMethod {
+                path: "crate::app_classes::TranslationsHelper".to_string(),
+                params: vec![],
+                defaults: vec![],
+            },
+        );
+        crate::emit::rust::expr::with_emit_ctx(ctx, || {
+            assert_eq!(
+                emit_send(None, "translation_button", &[], None),
+                "crate::app_classes::TranslationsHelper::translation_button()",
+            );
+        });
+    }
 }
