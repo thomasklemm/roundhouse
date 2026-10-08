@@ -15,11 +15,11 @@ use crate::App;
 pub(crate) mod ctx;
 pub(crate) mod decide;
 pub(crate) mod expr;
-mod runtime_method;
-mod spec;
 pub(crate) mod library;
 mod method;
+mod runtime_method;
 mod shared;
+mod spec;
 pub(crate) mod ty;
 
 pub use runtime_method::emit_method;
@@ -107,8 +107,7 @@ const RT_SESSION_SOURCE: &str = include_str!("../../runtime/rust/session.rs");
 const RT_ERRORS_EXT_SOURCE: &str = include_str!("../../runtime/rust/errors_ext.rs");
 const RT_ACTIVE_RECORD_ADAPTER_SOURCE: &str =
     include_str!("../../runtime/rust/active_record_adapter.rs");
-const RT_ADAPTER_INTERFACE_SOURCE: &str =
-    include_str!("../../runtime/rust/adapter_interface.rs");
+const RT_ADAPTER_INTERFACE_SOURCE: &str = include_str!("../../runtime/rust/adapter_interface.rs");
 const RT_HASH_EXT_SOURCE: &str = include_str!("../../runtime/rust/hash_ext.rs");
 const RT_DB_SOURCE: &str = include_str!("../../runtime/rust/db.rs");
 const RT_BROADCASTS_SOURCE: &str = include_str!("../../runtime/rust/broadcasts.rs");
@@ -163,6 +162,8 @@ use crate::http::RubyToS;
 use crate::models::*;
 #[allow(unused_imports)]
 use crate::views::*;
+#[allow(unused_imports)]
+use crate::app_classes::*;
 ";
 
 /// Prelude for emitted controller files. Controllers call into the
@@ -178,6 +179,12 @@ use crate::flash::Flash;
 use crate::session::Session;
 #[allow(unused_imports)]
 use crate::param_value::ParamValue;
+#[allow(unused_imports)]
+use crate::params::{self, Params};
+#[allow(unused_imports)]
+use std::fs::File;
+#[allow(unused_imports)]
+use std::time::Duration;
 #[allow(unused_imports)]
 use crate::db::Db;
 // `ActiveRecord::lower_bound` — the run lookup in the `includes(:assoc)` distribute the
@@ -198,6 +205,8 @@ use crate::models::*;
 use crate::views::*;
 #[allow(unused_imports)]
 use crate::errors_ext::{raise, NotImplementedError, RecordNotFound, RecordInvalid};
+#[allow(unused_imports)]
+use crate::app_classes::*;
 ";
 
 const MODEL_IMPORTS: &str = "\
@@ -319,7 +328,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         ("src/flash.rs", RT_FLASH_SOURCE),
         ("src/session.rs", RT_SESSION_SOURCE),
         ("src/errors_ext.rs", RT_ERRORS_EXT_SOURCE),
-        ("src/active_record_adapter.rs", RT_ACTIVE_RECORD_ADAPTER_SOURCE),
+        (
+            "src/active_record_adapter.rs",
+            RT_ACTIVE_RECORD_ADAPTER_SOURCE,
+        ),
         ("src/adapter_interface.rs", RT_ADAPTER_INTERFACE_SOURCE),
         ("src/hash_ext.rs", RT_HASH_EXT_SOURCE),
         ("src/db.rs", RT_DB_SOURCE),
@@ -496,8 +508,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // `Model.from_params(...)` by `rewrite_model_new_to_from_params`,
     // and the model needs the matching factory for those to resolve.
     // Mirrors typescript.rs / crystal.rs.
-    let params_specs =
-        crate::lower::controller_to_library::params::collect_specs(&app.controllers);
+    let params_specs = crate::lower::controller_to_library::params::collect_specs(&app.controllers);
 
     // Use `lower_models_with_registry_and_params` (not the simpler
     // `lower_models_with_registry`) so the per-class ClassInfo +
@@ -529,7 +540,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
     let route_helper_funcs = crate::lower::lower_routes_to_library_functions(app);
     let route_helpers_lc: Option<crate::dialect::LibraryClass> = if !route_helper_funcs.is_empty() {
-        let mut lcs = vec![crate::lower::module_funcs_to_library_class("RouteHelpers", &route_helper_funcs)];
+        let mut lcs = vec![crate::lower::module_funcs_to_library_class(
+            "RouteHelpers",
+            &route_helper_funcs,
+        )];
         let registry = crate::emit::rust::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
@@ -542,7 +556,10 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 
     let importmap_funcs = crate::lower::lower_importmap_to_library_functions(app);
     let importmap_lc: Option<crate::dialect::LibraryClass> = if !importmap_funcs.is_empty() {
-        let mut lcs = vec![crate::lower::module_funcs_to_library_class("Importmap", &importmap_funcs)];
+        let mut lcs = vec![crate::lower::module_funcs_to_library_class(
+            "Importmap",
+            &importmap_funcs,
+        )];
         let registry = crate::emit::rust::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
@@ -562,7 +579,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         // method bridges (Vec.size/each, Hash.size, etc.) miss.
         let mut view_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
             model_registry.clone().into_iter().collect();
-        view_extras.extend(crate::lower::library_extras::extras_from_funcs(&route_helper_funcs));
+        view_extras.extend(crate::lower::library_extras::extras_from_funcs(
+            &route_helper_funcs,
+        ));
         // HTML views + JSON jbuilder views fold into the same per-
         // directory module (`Views::Articles`). The html lowerer
         // produces `index` / `show` / `_article`; the jbuilder lowerer
@@ -570,11 +589,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         // the same struct name. Controller render branches dispatch
         // by `request_format`-driven name selection — both variants
         // need to land on the same `impl Articles { ... }`.
-        let mut raw_lcs = crate::lower::lower_views_to_library_classes(
-            &app.views,
-            app,
-            view_extras.clone(),
-        );
+        let mut raw_lcs =
+            crate::lower::lower_views_to_library_classes(&app.views, app, view_extras.clone());
         raw_lcs.extend(crate::lower::lower_jbuilder_to_library_classes(
             &app.views,
             app,
@@ -588,8 +604,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             merged
                 .entry(struct_name)
                 .and_modify(|acc: &mut crate::dialect::LibraryClass| {
-                    let seen: std::collections::BTreeSet<String> =
-                        acc.methods.iter().map(|m| m.name.as_str().to_string()).collect();
+                    let seen: std::collections::BTreeSet<String> = acc
+                        .methods
+                        .iter()
+                        .map(|m| m.name.as_str().to_string())
+                        .collect();
                     for m in lc.methods.clone() {
                         if !seen.contains(m.name.as_str()) {
                             acc.methods.push(m);
@@ -615,17 +634,16 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // hydrated records by name. Used by tests; production builds w/o
     // tests skip emission via the `app.test_modules` gate parallel
     // to Crystal's pattern.
-    let mut fixture_lcs: Vec<crate::dialect::LibraryClass> =
-        if !app.fixtures.is_empty() {
-            let mut lcs = crate::lower::lower_fixtures_to_library_classes(app);
-            let registry = crate::emit::rust::decide::str_color::build_registry(&lcs, &[]);
-            crate::emit::rust::decide::str_color::color_classes(&mut lcs, &registry);
-            crate::analyze::mutates_self::propagate(&mut lcs);
-            crate::analyze::block_refine::propagate(&mut lcs);
-            lcs
-        } else {
-            Vec::new()
-        };
+    let mut fixture_lcs: Vec<crate::dialect::LibraryClass> = if !app.fixtures.is_empty() {
+        let mut lcs = crate::lower::lower_fixtures_to_library_classes(app);
+        let registry = crate::emit::rust::decide::str_color::build_registry(&lcs, &[]);
+        crate::emit::rust::decide::str_color::color_classes(&mut lcs, &registry);
+        crate::analyze::mutates_self::propagate(&mut lcs);
+        crate::analyze::block_refine::propagate(&mut lcs);
+        lcs
+    } else {
+        Vec::new()
+    };
 
     // Controllers — extras include model_registry + view_lcs +
     // route_helper extras (mirror Crystal's `controller_extras` setup).
@@ -636,7 +654,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         let mut controller_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
             model_registry.clone().into_iter().collect();
         controller_extras.extend(crate::lower::library_extras::extras_from_lcs(&view_lcs));
-        controller_extras.extend(crate::lower::library_extras::extras_from_funcs(&route_helper_funcs));
+        controller_extras.extend(crate::lower::library_extras::extras_from_funcs(
+            &route_helper_funcs,
+        ));
         let assocs = crate::lower::model_associations::compute_association_graph(app);
         let mut lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
             &app.controllers,
@@ -655,6 +675,78 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         Vec::new()
     };
 
+    // App-owned support classes (Current, helpers, POROs in app/ and
+    // lib/) are distinct from the framework runtime and Rails components
+    // lowered above. Keep only classes not already represented by those
+    // components, and omit ActiveRecord descendants (the model lowering
+    // owns those structs).
+    let emitted_names: std::collections::HashSet<String> = app
+        .models
+        .iter()
+        .map(|m| m.name.0.as_str().to_string())
+        .chain(
+            app.controllers
+                .iter()
+                .map(|c| c.name.0.as_str().to_string()),
+        )
+        .chain(view_lcs.iter().map(|c| c.name.0.as_str().to_string()))
+        .chain(runtime_lcs.iter().map(|c| c.name.0.as_str().to_string()))
+        .collect();
+    let mut app_lcs: Vec<crate::dialect::LibraryClass> = app
+        .library_classes
+        .iter()
+        .filter(|lc| {
+            // Rails applications commonly define `String` methods in
+            // `config/initializers` or `lib/rails_ext/string.rb`. That is
+            // a monkey-patch of Ruby's built-in class, not an application
+            // type. Emitting it as `app_classes::String` shadows Rust's
+            // prelude `String` in every module that imports app classes.
+            // Its methods need dedicated extension-trait support rather
+            // than a second, unrelated struct.
+            if lc.name.0.as_str() == "String" {
+                return false;
+            }
+            if emitted_names.contains(lc.name.0.as_str()) {
+                return false;
+            }
+            let mut parent = lc.parent.as_ref().map(|p| p.0.as_str());
+            while let Some(name) = parent {
+                if name == "ActiveRecord::Base" || name == "ApplicationRecord" {
+                    return false;
+                }
+                parent = app
+                    .library_classes
+                    .iter()
+                    .find(|candidate| candidate.name.0.as_str() == name)
+                    .and_then(|candidate| candidate.parent.as_ref().map(|p| p.0.as_str()));
+            }
+            true
+        })
+        .cloned()
+        .collect();
+    // Rails helper modules are included into views as module functions.
+    // Represent those methods as associated functions so the lowered
+    // `ApplicationHelper::foo(...)` calls have a concrete target.
+    let helper_modules: std::collections::HashSet<String> = app
+        .helper_method_index
+        .values()
+        .map(|name| name.0.as_str().to_string())
+        .collect();
+    for lc in &mut app_lcs {
+        if helper_modules.contains(lc.name.0.as_str()) {
+            for method in &mut lc.methods {
+                method.receiver = crate::dialect::MethodReceiver::Class;
+            }
+        }
+    }
+    if !app_lcs.is_empty() {
+        let registry = crate::emit::rust::decide::str_color::build_registry(&app_lcs, &[]);
+        crate::emit::rust::decide::str_color::color_classes(&mut app_lcs, &registry);
+        crate::analyze::mutates_self::propagate(&mut app_lcs);
+        crate::analyze::block_refine::propagate(&mut app_lcs);
+        decide::decide_classes(&mut app_lcs);
+    }
+
     let emit_ctx = collect_global_class_methods(
         &model_lcs,
         route_helpers_lc.as_ref(),
@@ -662,6 +754,7 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         &view_lcs,
         &controller_lcs,
         &fixture_lcs,
+        &app_lcs,
         &runtime_lcs,
     );
     // Ty-coerce-insertion lowerer — wraps Send args in `Cast { value,
@@ -675,183 +768,214 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // backstop them (which it used to until the lowerer caught up).
     let runtime_refs: Vec<&crate::dialect::LibraryClass> = runtime_lcs.iter().collect();
     {
-        let mut model_extras: Vec<&crate::dialect::LibraryClass> =
-            view_lcs.iter().chain(controller_lcs.iter()).chain(fixture_lcs.iter()).collect();
+        let mut model_extras: Vec<&crate::dialect::LibraryClass> = view_lcs
+            .iter()
+            .chain(controller_lcs.iter())
+            .chain(fixture_lcs.iter())
+            .chain(app_lcs.iter())
+            .collect();
         model_extras.extend(runtime_refs.iter().copied());
         crate::lower::insert_ty_coercions_with_extras(&mut model_lcs, &model_extras);
     }
     {
-        let mut view_extras: Vec<&crate::dialect::LibraryClass> =
-            model_lcs.iter().chain(controller_lcs.iter()).chain(fixture_lcs.iter()).collect();
+        let mut view_extras: Vec<&crate::dialect::LibraryClass> = model_lcs
+            .iter()
+            .chain(controller_lcs.iter())
+            .chain(fixture_lcs.iter())
+            .chain(app_lcs.iter())
+            .collect();
         view_extras.extend(runtime_refs.iter().copied());
         crate::lower::insert_ty_coercions_with_extras(&mut view_lcs, &view_extras);
     }
     {
-        let mut controller_extras: Vec<&crate::dialect::LibraryClass> =
-            model_lcs.iter().chain(view_lcs.iter()).chain(fixture_lcs.iter()).collect();
+        let mut controller_extras: Vec<&crate::dialect::LibraryClass> = model_lcs
+            .iter()
+            .chain(view_lcs.iter())
+            .chain(fixture_lcs.iter())
+            .chain(app_lcs.iter())
+            .collect();
         controller_extras.extend(runtime_refs.iter().copied());
         crate::lower::insert_ty_coercions_with_extras(&mut controller_lcs, &controller_extras);
     }
     {
-        let mut fixture_extras: Vec<&crate::dialect::LibraryClass> =
-            model_lcs.iter().chain(view_lcs.iter()).chain(controller_lcs.iter()).collect();
+        let mut fixture_extras: Vec<&crate::dialect::LibraryClass> = model_lcs
+            .iter()
+            .chain(view_lcs.iter())
+            .chain(controller_lcs.iter())
+            .chain(app_lcs.iter())
+            .collect();
         fixture_extras.extend(runtime_refs.iter().copied());
         crate::lower::insert_ty_coercions_with_extras(&mut fixture_lcs, &fixture_extras);
     }
+    {
+        let extras: Vec<&crate::dialect::LibraryClass> = model_lcs
+            .iter()
+            .chain(view_lcs.iter())
+            .chain(controller_lcs.iter())
+            .chain(fixture_lcs.iter())
+            .chain(runtime_refs.iter().copied())
+            .collect();
+        crate::lower::insert_ty_coercions_with_extras(&mut app_lcs, &extras);
+    }
 
     crate::emit::rust::expr::with_emit_ctx(emit_ctx, || {
-    // (The late decide pass that used to stamp `OPTION_WRAP` was
-    // retired once the `ty_coerce_insertion` lowerer subsumed its
-    // coverage. The per-category `decide_classes` call earlier in
-    // this fn handles the remaining registry-independent bits —
-    // parens, str_color, last_use.)
-    if !model_lcs.is_empty() {
-        for lc in &model_lcs {
-            let stem = crate::naming::snake_case(lc.name.0.as_str());
-            let body = match library::emit_library_class(lc) {
-                Ok(s) => s,
-                Err(e) => {
-                    emit_failure_stub(&format!("model `{}`", lc.name.0.as_str()), &e)
-                }
-            };
-            // App-model emit calls into the rust primitive runtime
-            // (`Db::prepare`, etc.) and the transpiled framework
-            // runtime (`Base`, `Broadcasts`, …). Prepend `use crate::*`
-            // imports for the known surface. Over-imports are
-            // harmless under Rust's `#[allow(unused_imports)]`
-            // permissive default; under-imports trip E0433. Add new
-            // entries here when a follow-up phase surfaces another
-            // bare reference.
-            //
-            // AR::Base inheritance shim — Rust lacks class inheritance,
-            // so methods carried by `runtime/ruby/active_record/base.rb`
-            // (`mark_persisted!`, `errors`, `save`, `update`) aren't
-            // automatically available on the lowered per-model struct.
-            // Append a minimal impl block for the three methods that
-            // call sites synthesized by the model lowerer reach:
-            // `mark_persisted_bang` (no-op), `errors` (returns empty
-            // `Vec<String>`), `save` (drives validate + returns true).
-            // Behavioral simplifications — lifecycle callbacks not
-            // fired, errors not accumulated across validate→save — are
-            // acceptable for Phase 5 compile-cleanup; later sessions
-            // route through the lowerer's specialization-always-on
-            // path (project_specialization_strategy.md) for the per-
-            // model body restoration.
-            //
-            // Gate on `_adapter_insert` to skip ApplicationRecord
-            // (abstract, no table) and synthesized Row classes (no
-            // adapter methods).
-            let needs_ar_shim = lc
-                .methods
-                .iter()
-                .any(|m| m.name.as_str() == "_adapter_insert");
-            // Per-model lifecycle hooks emitted by the lowerer:
-            // `before_destroy` exists when the model declares
-            // `has_many :x, dependent: :destroy` (Article in real-blog
-            // does this), where the lowerer expands the dependent
-            // policy into a `before_destroy` body that iterates the
-            // association and destroys each row. The shim's `destroy`
-            // needs to fire the hook before `_adapter_delete`,
-            // otherwise the cascade never runs and the test
-            // `test_destroys_comments_when_article_is_destroyed`
-            // sees an unchanged Comment.count. Conditional because
-            // not every model has the hook; emitting a bare call to
-            // a missing method would E0599.
-            let has_before_destroy = lc
-                .methods
-                .iter()
-                .any(|m| m.name.as_str() == "before_destroy");
-            // After-commit lifecycle hooks emitted by the lowerer when the
-            // model declares `broadcasts_to` / `after_*_commit` (Comment in
-            // real-blog broadcasts comment + parent-article changes over
-            // Action Cable). The shim's save/destroy must FIRE them, or the
-            // Turbo Stream broadcast never goes out — a subscribed
-            // `<turbo-cable-stream-source>` sees nothing (the e2e
-            // action_cable spec). Conditional, same as `before_destroy`:
-            // a bare call to a hook a model doesn't define would E0599.
-            // The hooks are `&self` methods; calling them on `&mut self`
-            // auto-reborrows. Fired after the adapter write so `self.id`
-            // (and the persisted row) are in place.
-            let has_method = |n: &str| lc.methods.iter().any(|m| m.name.as_str() == n);
-            let after_create_commit = if has_method("after_create_commit") {
-                " self.after_create_commit();"
-            } else {
-                ""
-            };
-            let after_update_commit = if has_method("after_update_commit") {
-                " self.after_update_commit();"
-            } else {
-                ""
-            };
-            let after_destroy_commit = if has_method("after_destroy_commit") {
-                " self.after_destroy_commit();"
-            } else {
-                ""
-            };
-            let destroy_body = format!(
-                "{before}self._adapter_delete();{after}",
-                before = if has_before_destroy { "self.before_destroy(); " } else { "" },
-                after = after_destroy_commit,
-            );
-            let ar_shim = if needs_ar_shim {
-                // `destroy` and `exists` are paired in:
-                //   - Article#dependent_destroy: `c.destroy()` over the
-                //     has_many comments collection (Comment side)
-                //   - Comment#validate's belongs_to inline check:
-                //     `Article::exists(self.article_id)` (Article side)
-                // Both are AR::Base methods in Crystal/Spinel/Ruby
-                // (inherited); Rust needs them on the concrete struct.
-                // Minimal stubs: `destroy` flips persisted+destroyed
-                // flags (no-op without state — current shim is
-                // intentionally stateless); `exists` routes through
-                // the lowerer-emitted `_adapter_exists_by_id`.
-                // Class-method wrappers that delegate to the lowerer-
-                // emitted `_adapter_*` methods. AR::Base in Ruby
-                // provides `count`/`all`/`create`/etc. that are
-                // inherited; Rust has no inheritance, so the per-model
-                // struct needs explicit wrappers. The underlying
-                // `_adapter_count` / `_adapter_all` /
-                // `_adapter_insert` are emitted by the model
-                // lowerer's `adapter_emit` pass and live on the
-                // struct already; the shim just renames them to the
-                // Rails-API surface that app code + test bodies
-                // expect.
+        // (The late decide pass that used to stamp `OPTION_WRAP` was
+        // retired once the `ty_coerce_insertion` lowerer subsumed its
+        // coverage. The per-category `decide_classes` call earlier in
+        // this fn handles the remaining registry-independent bits —
+        // parens, str_color, last_use.)
+        if !app_lcs.is_empty() {
+            files.extend(emit_app_library_classes(&app_lcs));
+        }
+        if !model_lcs.is_empty() {
+            for lc in &model_lcs {
+                let stem = crate::naming::underscore(lc.name.0.as_str());
+                let body = match library::emit_library_class(lc) {
+                    Ok(s) => s,
+                    Err(e) => emit_failure_stub(&format!("model `{}`", lc.name.0.as_str()), &e),
+                };
+                // App-model emit calls into the rust primitive runtime
+                // (`Db::prepare`, etc.) and the transpiled framework
+                // runtime (`Base`, `Broadcasts`, …). Prepend `use crate::*`
+                // imports for the known surface. Over-imports are
+                // harmless under Rust's `#[allow(unused_imports)]`
+                // permissive default; under-imports trip E0433. Add new
+                // entries here when a follow-up phase surfaces another
+                // bare reference.
                 //
-                // `create(attrs)` mirrors Rails' `Model.create(attrs)`
-                // = `Model.new(attrs).save!`. Builds the struct,
-                // validates+inserts via save, returns it. Returned
-                // by value (not Result/Option) — Rails raises on
-                // validation failure, which we surface as panic via
-                // the validate path.
-                // Save shape: clear per-thread validation buffer,
-                // run validate (which `validation_errors_push`-es each
-                // failed rule via the rust emit post-process below),
-                // bail with `false` if any messages landed, otherwise
-                // insert (new record) or update (already persisted)
-                // through the lowerer-emitted `_adapter_*` methods.
-                // Persistence sentinel is `self.id != 0` — matches the
-                // legacy synth_initialize id-default of 0 + sqlite
-                // AUTOINCREMENT-on-insert semantics; the `find_by_id`
-                // existence probe handles the fixture-loader case of
-                // a pre-set id whose row isn't in the DB yet.
+                // AR::Base inheritance shim — Rust lacks class inheritance,
+                // so methods carried by `runtime/ruby/active_record/base.rb`
+                // (`mark_persisted!`, `errors`, `save`, `update`) aren't
+                // automatically available on the lowered per-model struct.
+                // Append a minimal impl block for the three methods that
+                // call sites synthesized by the model lowerer reach:
+                // `mark_persisted_bang` (no-op), `errors` (returns empty
+                // `Vec<String>`), `save` (drives validate + returns true).
+                // Behavioral simplifications — lifecycle callbacks not
+                // fired, errors not accumulated across validate→save — are
+                // acceptable for Phase 5 compile-cleanup; later sessions
+                // route through the lowerer's specialization-always-on
+                // path (project_specialization_strategy.md) for the per-
+                // model body restoration.
                 //
-                // `errors(&self)` returns a snapshot of the current
-                // thread-local buffer so app-side reads
-                // (`record.errors`) see the validation messages that
-                // accumulated during the most recent `save`.
-                //
-                // `save_after_validation` is the post-validation half,
-                // split out for the same reason
-                // `runtime/ruby/active_record/base.rb` splits it: the
-                // fixture loader uses it, because Rails loads fixtures
-                // with raw SQL and runs no validations. Rust needs its
-                // own copy — every other target's AR base is TRANSPILED
-                // from that Ruby file and inherits the split, but these
-                // model impls are generated here, so a tree-level grep
-                // for the name finds it in the runtime and still misses
-                // the model. `smoke (rust)` is what caught that.
-                format!(
-                    "\nimpl {name} {{\n\
+                // Gate on `_adapter_insert` to skip ApplicationRecord
+                // (abstract, no table) and synthesized Row classes (no
+                // adapter methods).
+                let needs_ar_shim = lc
+                    .methods
+                    .iter()
+                    .any(|m| m.name.as_str() == "_adapter_insert");
+                // Per-model lifecycle hooks emitted by the lowerer:
+                // `before_destroy` exists when the model declares
+                // `has_many :x, dependent: :destroy` (Article in real-blog
+                // does this), where the lowerer expands the dependent
+                // policy into a `before_destroy` body that iterates the
+                // association and destroys each row. The shim's `destroy`
+                // needs to fire the hook before `_adapter_delete`,
+                // otherwise the cascade never runs and the test
+                // `test_destroys_comments_when_article_is_destroyed`
+                // sees an unchanged Comment.count. Conditional because
+                // not every model has the hook; emitting a bare call to
+                // a missing method would E0599.
+                let has_before_destroy = lc
+                    .methods
+                    .iter()
+                    .any(|m| m.name.as_str() == "before_destroy");
+                // After-commit lifecycle hooks emitted by the lowerer when the
+                // model declares `broadcasts_to` / `after_*_commit` (Comment in
+                // real-blog broadcasts comment + parent-article changes over
+                // Action Cable). The shim's save/destroy must FIRE them, or the
+                // Turbo Stream broadcast never goes out — a subscribed
+                // `<turbo-cable-stream-source>` sees nothing (the e2e
+                // action_cable spec). Conditional, same as `before_destroy`:
+                // a bare call to a hook a model doesn't define would E0599.
+                // The hooks are `&self` methods; calling them on `&mut self`
+                // auto-reborrows. Fired after the adapter write so `self.id`
+                // (and the persisted row) are in place.
+                let has_method = |n: &str| lc.methods.iter().any(|m| m.name.as_str() == n);
+                let after_create_commit = if has_method("after_create_commit") {
+                    " self.after_create_commit();"
+                } else {
+                    ""
+                };
+                let after_update_commit = if has_method("after_update_commit") {
+                    " self.after_update_commit();"
+                } else {
+                    ""
+                };
+                let after_destroy_commit = if has_method("after_destroy_commit") {
+                    " self.after_destroy_commit();"
+                } else {
+                    ""
+                };
+                let destroy_body = format!(
+                    "{before}self._adapter_delete();{after}",
+                    before = if has_before_destroy {
+                        "self.before_destroy(); "
+                    } else {
+                        ""
+                    },
+                    after = after_destroy_commit,
+                );
+                let ar_shim = if needs_ar_shim {
+                    // `destroy` and `exists` are paired in:
+                    //   - Article#dependent_destroy: `c.destroy()` over the
+                    //     has_many comments collection (Comment side)
+                    //   - Comment#validate's belongs_to inline check:
+                    //     `Article::exists(self.article_id)` (Article side)
+                    // Both are AR::Base methods in Crystal/Spinel/Ruby
+                    // (inherited); Rust needs them on the concrete struct.
+                    // Minimal stubs: `destroy` flips persisted+destroyed
+                    // flags (no-op without state — current shim is
+                    // intentionally stateless); `exists` routes through
+                    // the lowerer-emitted `_adapter_exists_by_id`.
+                    // Class-method wrappers that delegate to the lowerer-
+                    // emitted `_adapter_*` methods. AR::Base in Ruby
+                    // provides `count`/`all`/`create`/etc. that are
+                    // inherited; Rust has no inheritance, so the per-model
+                    // struct needs explicit wrappers. The underlying
+                    // `_adapter_count` / `_adapter_all` /
+                    // `_adapter_insert` are emitted by the model
+                    // lowerer's `adapter_emit` pass and live on the
+                    // struct already; the shim just renames them to the
+                    // Rails-API surface that app code + test bodies
+                    // expect.
+                    //
+                    // `create(attrs)` mirrors Rails' `Model.create(attrs)`
+                    // = `Model.new(attrs).save!`. Builds the struct,
+                    // validates+inserts via save, returns it. Returned
+                    // by value (not Result/Option) — Rails raises on
+                    // validation failure, which we surface as panic via
+                    // the validate path.
+                    // Save shape: clear per-thread validation buffer,
+                    // run validate (which `validation_errors_push`-es each
+                    // failed rule via the rust emit post-process below),
+                    // bail with `false` if any messages landed, otherwise
+                    // insert (new record) or update (already persisted)
+                    // through the lowerer-emitted `_adapter_*` methods.
+                    // Persistence sentinel is `self.id != 0` — matches the
+                    // legacy synth_initialize id-default of 0 + sqlite
+                    // AUTOINCREMENT-on-insert semantics; the `find_by_id`
+                    // existence probe handles the fixture-loader case of
+                    // a pre-set id whose row isn't in the DB yet.
+                    //
+                    // `errors(&self)` returns a snapshot of the current
+                    // thread-local buffer so app-side reads
+                    // (`record.errors`) see the validation messages that
+                    // accumulated during the most recent `save`.
+                    //
+                    // `save_after_validation` is the post-validation half,
+                    // split out for the same reason
+                    // `runtime/ruby/active_record/base.rb` splits it: the
+                    // fixture loader uses it, because Rails loads fixtures
+                    // with raw SQL and runs no validations. Rust needs its
+                    // own copy — every other target's AR base is TRANSPILED
+                    // from that Ruby file and inherits the split, but these
+                    // model impls are generated here, so a tree-level grep
+                    // for the name finds it in the runtime and still misses
+                    // the model. `smoke (rust)` is what caught that.
+                    format!(
+                        "\nimpl {name} {{\n\
                         pub fn mark_persisted_bang(&mut self) {{ }}\n\
                         pub fn errors(&self) -> Vec<String> {{ crate::errors_ext::validation_errors_snapshot() }}\n\
                         pub fn save(&mut self) -> bool {{\n\
@@ -884,99 +1008,97 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                         pub fn _note_hydrated(&self) {{}}\n\
                         pub fn create(attrs: std::collections::HashMap<String, serde_json::Value>) -> {name} {{ let mut m = Self::new(attrs); m.save(); m }}\n\
                     }}\n",
-                    name = lc.name.0.as_str(),
-                    destroy_body = destroy_body,
-                    after_create_commit = after_create_commit,
-                    after_update_commit = after_update_commit,
-                )
-            } else {
-                String::new()
-            };
-            // Validate-body errors-rewrite: every `validates_*` rule
-            // the lowerer emits lands as `self.errors().push("msg"
-            // .to_string())` inside the `validate(&self)` body. The
-            // AR shim's `errors(&self)` returns a snapshot Vec, so a
-            // `.push` against that owned value drops the message —
-            // breaking every validation test. Route those pushes
-            // through the thread-local `validation_errors_push`
-            // helper instead so `save` sees the accumulated messages.
-            //
-            // Scoped to the literal pattern from validations emit; if
-            // future rewrites change the shape (e.g., qualify the
-            // `errors` send differently), this rewrite stops firing
-            // and the bare `errors().push` falls through harmlessly
-            // until updated.
-            let content = format!("{MODEL_IMPORTS}{body}{ar_shim}");
-            let content = content.replace(
-                "self.errors().push(",
-                "crate::errors_ext::validation_errors_push(",
-            );
-            files.push(EmittedFile {
-                path: PathBuf::from(format!("src/models/{stem}.rs")),
-                content,
-            });
+                        name = lc.name.0.as_str(),
+                        destroy_body = destroy_body,
+                        after_create_commit = after_create_commit,
+                        after_update_commit = after_update_commit,
+                    )
+                } else {
+                    String::new()
+                };
+                // Validate-body errors-rewrite: every `validates_*` rule
+                // the lowerer emits lands as `self.errors().push("msg"
+                // .to_string())` inside the `validate(&self)` body. The
+                // AR shim's `errors(&self)` returns a snapshot Vec, so a
+                // `.push` against that owned value drops the message —
+                // breaking every validation test. Route those pushes
+                // through the thread-local `validation_errors_push`
+                // helper instead so `save` sees the accumulated messages.
+                //
+                // Scoped to the literal pattern from validations emit; if
+                // future rewrites change the shape (e.g., qualify the
+                // `errors` send differently), this rewrite stops firing
+                // and the bare `errors().push` falls through harmlessly
+                // until updated.
+                let content = format!("{MODEL_IMPORTS}{body}{ar_shim}");
+                let content = content.replace(
+                    "self.errors().push(",
+                    "crate::errors_ext::validation_errors_push(",
+                );
+                files.push(EmittedFile {
+                    path: PathBuf::from(format!("src/models/{stem}.rs")),
+                    content,
+                });
+            }
+            files.extend(emit_models_mod_rs(&model_lcs));
         }
-        files.push(emit_models_mod_rs(&model_lcs));
-    }
 
-    if let Some(lc) = &route_helpers_lc {
-        let body = match library::emit_library_class(lc) {
-            Ok(s) => s,
-            Err(e) => emit_failure_stub("route_helpers", &e),
-        };
-        // Wedge 2c.3: bare-fn compat shim. Legacy-emit controller
-        // tests call `route_helpers::article_path(id)`; rust emits
-        // these as `RouteHelpers::article_path(id)` (`impl
-        // RouteHelpers`). Append per-method delegating wrappers so
-        // both call shapes resolve.
-        let bare_wrappers = render_route_helpers_bare_wrappers(lc);
-        files.push(EmittedFile {
-            path: PathBuf::from("src/route_helpers.rs"),
-            content: format!("{body}{bare_wrappers}"),
-        });
-    }
-
-    if let Some(lc) = &importmap_lc {
-        let body = match library::emit_library_class(lc) {
-            Ok(s) => s,
-            Err(e) => emit_failure_stub("importmap", &e),
-        };
-        files.push(EmittedFile {
-            path: PathBuf::from("src/importmap.rs"),
-            content: body,
-        });
-    }
-
-    if !view_lcs.is_empty() {
-        let mut view_entries: Vec<(String, String)> = Vec::new();
-        for lc in &view_lcs {
-            let raw = lc.name.0.as_str();
-            let struct_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
-            let stem = crate::naming::snake_case(&struct_name);
+        if let Some(lc) = &route_helpers_lc {
             let body = match library::emit_library_class(lc) {
                 Ok(s) => s,
-                Err(e) => {
-                    emit_failure_stub(&format!("view `{}`", lc.name.0.as_str()), &e)
-                }
+                Err(e) => emit_failure_stub("route_helpers", &e),
             };
-            // Layout bridge (mirrors Crystal's
-            // `layout: ->(body) { Views::Layouts.application(body) }`):
-            // when emitting the `Layouts` view module, append a free
-            // `pub fn render_layout()` that calls `Layouts::application
-            // (&get_yield(), None, None)`. `main.rs` then passes
-            // `Some(crate::views::layouts::render_layout)` into
-            // `StartOptions.layout`. The server runtime
-            // (`layout_wrap` middleware) fires the layout fn after
-            // each controller returns; without this bridge it falls
-            // back to the hardcoded minimal `<head>` shell.
-            //
-            // Notice/alert default to `None` here — flash plumbing
-            // through the layout slot is a follow-on (the controller
-            // already passes `self.flash.get("notice")` into the per-
-            // action view, so the inner-body shows flash; the layout
-            // would need a separate thread-local hand-off).
-            let layout_extra = if struct_name == "Layouts" {
-                "\n// Wedge 2c.4 layout bridge — server runtime slot is\n\
+            // Wedge 2c.3: bare-fn compat shim. Legacy-emit controller
+            // tests call `route_helpers::article_path(id)`; rust emits
+            // these as `RouteHelpers::article_path(id)` (`impl
+            // RouteHelpers`). Append per-method delegating wrappers so
+            // both call shapes resolve.
+            let bare_wrappers = render_route_helpers_bare_wrappers(lc);
+            files.push(EmittedFile {
+                path: PathBuf::from("src/route_helpers.rs"),
+                content: format!("{body}{bare_wrappers}"),
+            });
+        }
+
+        if let Some(lc) = &importmap_lc {
+            let body = match library::emit_library_class(lc) {
+                Ok(s) => s,
+                Err(e) => emit_failure_stub("importmap", &e),
+            };
+            files.push(EmittedFile {
+                path: PathBuf::from("src/importmap.rs"),
+                content: body,
+            });
+        }
+
+        if !view_lcs.is_empty() {
+            let mut view_entries: Vec<(String, String)> = Vec::new();
+            for lc in &view_lcs {
+                let raw = lc.name.0.as_str();
+                let struct_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
+                let stem = crate::naming::snake_case(&struct_name);
+                let body = match library::emit_library_class(lc) {
+                    Ok(s) => s,
+                    Err(e) => emit_failure_stub(&format!("view `{}`", lc.name.0.as_str()), &e),
+                };
+                // Layout bridge (mirrors Crystal's
+                // `layout: ->(body) { Views::Layouts.application(body) }`):
+                // when emitting the `Layouts` view module, append a free
+                // `pub fn render_layout()` that calls `Layouts::application
+                // (&get_yield(), None, None)`. `main.rs` then passes
+                // `Some(crate::views::layouts::render_layout)` into
+                // `StartOptions.layout`. The server runtime
+                // (`layout_wrap` middleware) fires the layout fn after
+                // each controller returns; without this bridge it falls
+                // back to the hardcoded minimal `<head>` shell.
+                //
+                // Notice/alert default to `None` here — flash plumbing
+                // through the layout slot is a follow-on (the controller
+                // already passes `self.flash.get("notice")` into the per-
+                // action view, so the inner-body shows flash; the layout
+                // would need a separate thread-local hand-off).
+                let layout_extra = if struct_name == "Layouts" {
+                    "\n// Wedge 2c.4 layout bridge — server runtime slot is\n\
                  // `fn() -> String` (no args), so wrap the 3-arg\n\
                  // template signature with a thread-local body read.\n\
                  pub fn render_layout() -> String {\n    \
@@ -984,79 +1106,81 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                  Layouts::application(&body, None, None)\n\
                  }\n"
                     .to_string()
-            } else {
-                String::new()
-            };
-            let content = format!("{VIEW_IMPORTS}{body}{layout_extra}");
-            files.push(EmittedFile {
-                path: PathBuf::from(format!("src/views/{stem}.rs")),
-                content,
-            });
-            view_entries.push((stem, struct_name));
-        }
-        files.push(emit_views_mod_rs(&view_entries));
-    }
-
-    // Controllers — controller LCs with `origin: None` go to
-    // `src/controllers/<stem>.rs`; synthesized `<Resource>Params`
-    // classes (origin: Some) go to `src/models/<stem>.rs` since they
-    // belong to the model layer conceptually. Mirrors Crystal's
-    // routing.
-    // Wedge 2c.2: flatten the route table once so both the per-
-    // controller wrapper emit (next loop) and the `router::router()`
-    // body (router-file append a few sections earlier in this fn's
-    // post-`with_global_class_methods` work) read from a single
-    // source. Stashed so the per-controller emit picks the right
-    // subset by ClassId match.
-    let flat_routes_2c = crate::lower::flatten_routes(app);
-
-    if !controller_lcs.is_empty() {
-        let mut controller_entries: Vec<(String, String)> = Vec::new();
-        let mut model_param_entries: Vec<(String, String)> = Vec::new();
-        for lc in &controller_lcs {
-            let raw = lc.name.0.as_str();
-            let struct_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
-            let stem = crate::naming::snake_case(&struct_name);
-            let body = match library::emit_library_class(lc) {
-                Ok(s) => s,
-                Err(e) => {
-                    emit_failure_stub(&format!("controller `{}`", lc.name.0.as_str()), &e)
-                }
-            };
-            if lc.origin.is_some() {
-                // Synthesized `<Resource>Params` — emit under
-                // `src/models/`. Re-use MODEL_IMPORTS so adapter/db/
-                // sibling-model references resolve.
-                let content = format!("{MODEL_IMPORTS}{body}");
+                } else {
+                    String::new()
+                };
+                let content = format!("{VIEW_IMPORTS}{body}{layout_extra}");
                 files.push(EmittedFile {
-                    path: PathBuf::from(format!("src/models/{stem}.rs")),
+                    path: PathBuf::from(format!("src/views/{stem}.rs")),
                     content,
                 });
-                model_param_entries.push((stem, struct_name));
-            } else {
-                // AC::Base inheritance shim — appended `impl <Name>`
-                // block providing the request-lifecycle helpers that
-                // controller bodies invoke as `Send`s on self.
-                //
-                // **Wedge 2c.1**: render/render_with/redirect_to/head
-                // route through `crate::http::response_*` thread-local
-                // state. Axum wrappers (emitted alongside, follow-on
-                // 2c.2) clear the state before calling the action and
-                // read it back to build the `Response`. Honors Rails'
-                // common opts keys: `content_type` on render_with /
-                // head, `status: :see_other` on redirect_to (defaults
-                // to 303 to match Rails post-mutation convention).
-                //
-                // The field-shape ivars (`flash`, `session`, `params`,
-                // ...) come from `walk_collect_ivars`'s read-only ivar
-                // surface and land on the struct naturally.
-                // CSRF helpers landed on AC::Base#process_action
-                // (Masked CSRF). App controllers inherit that body
-                // but do not embed Base — stub the two Sends so the
-                // inherited process_action compiles. Full CSRF via
-                // the http thread-local surface is a follow-on.
-                let ac_shim = format!(
-                    "\nimpl {name} {{\n\
+                view_entries.push((stem, struct_name));
+            }
+            files.push(emit_views_mod_rs(&view_entries));
+        }
+
+        // Controllers — controller LCs with `origin: None` go to
+        // `src/controllers/<stem>.rs`; synthesized `<Resource>Params`
+        // classes (origin: Some) go to `src/models/<stem>.rs` since they
+        // belong to the model layer conceptually. Mirrors Crystal's
+        // routing.
+        // Wedge 2c.2: flatten the route table once so both the per-
+        // controller wrapper emit (next loop) and the `router::router()`
+        // body (router-file append a few sections earlier in this fn's
+        // post-`with_global_class_methods` work) read from a single
+        // source. Stashed so the per-controller emit picks the right
+        // subset by ClassId match.
+        let flat_routes_2c = crate::lower::flatten_routes(app);
+
+        if !controller_lcs.is_empty() {
+            let mut controller_entries: Vec<(String, String)> = Vec::new();
+            let mut model_param_entries: Vec<(String, String)> = Vec::new();
+            for lc in &controller_lcs {
+                let raw = lc.name.0.as_str();
+                let struct_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
+                let stem = crate::naming::underscore(raw);
+                let body = match library::emit_library_class(lc) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        emit_failure_stub(&format!("controller `{}`", lc.name.0.as_str()), &e)
+                    }
+                };
+                let body =
+                    body.replace(&format!("impl {raw} {{"), &format!("impl {struct_name} {{"));
+                if lc.origin.is_some() {
+                    // Synthesized `<Resource>Params` — emit under
+                    // `src/models/`. Re-use MODEL_IMPORTS so adapter/db/
+                    // sibling-model references resolve.
+                    let content = format!("{MODEL_IMPORTS}{body}");
+                    files.push(EmittedFile {
+                        path: PathBuf::from(format!("src/models/{stem}.rs")),
+                        content,
+                    });
+                    model_param_entries.push((stem, raw.to_string()));
+                } else {
+                    // AC::Base inheritance shim — appended `impl <Name>`
+                    // block providing the request-lifecycle helpers that
+                    // controller bodies invoke as `Send`s on self.
+                    //
+                    // **Wedge 2c.1**: render/render_with/redirect_to/head
+                    // route through `crate::http::response_*` thread-local
+                    // state. Axum wrappers (emitted alongside, follow-on
+                    // 2c.2) clear the state before calling the action and
+                    // read it back to build the `Response`. Honors Rails'
+                    // common opts keys: `content_type` on render_with /
+                    // head, `status: :see_other` on redirect_to (defaults
+                    // to 303 to match Rails post-mutation convention).
+                    //
+                    // The field-shape ivars (`flash`, `session`, `params`,
+                    // ...) come from `walk_collect_ivars`'s read-only ivar
+                    // surface and land on the struct naturally.
+                    // CSRF helpers landed on AC::Base#process_action
+                    // (Masked CSRF). App controllers inherit that body
+                    // but do not embed Base — stub the two Sends so the
+                    // inherited process_action compiles. Full CSRF via
+                    // the http thread-local surface is a follow-on.
+                    let ac_shim = format!(
+                        "\nimpl {name} {{\n\
                     \x20   pub fn render(&self, content: String) {{\n\
                     \x20       crate::http::response_set_body(content);\n\
                     \x20   }}\n\
@@ -1085,346 +1209,352 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     \x20   pub fn verify_authenticity_token(&mut self) {{}}\n\
                     \x20   pub fn performed_pred(&self) -> bool {{ false }}\n\
                     }}\n",
-                    name = lc.name.0.as_str()
+                        name = struct_name
+                    );
+                    // Rails' `action_name`. The lowered dispatcher calls
+                    // `assign_action_name` only in a controller that reads
+                    // `action_name`, so only that controller gets the field
+                    // and the two methods. The other controllers emit as
+                    // before.
+                    let sets_action_name = lc_calls_method(lc, "assign_action_name");
+                    let (body, ac_shim) = if sets_action_name {
+                        (
+                            with_action_name_field(&body, &struct_name),
+                            ac_shim + &action_name_shim(&struct_name),
+                        )
+                    } else {
+                        (body, ac_shim)
+                    };
+                    // Does this controller carry a `flash` field? Only
+                    // controllers that read `self.flash` for view display
+                    // (index/show/…) get one (see `collect_ivar_types`);
+                    // redirect-only controllers like CommentsController
+                    // don't. The wrapper loads the incoming flash cookie
+                    // into `c.flash` only when the field exists; the
+                    // outgoing path is field-independent (thread-local).
+                    let has_flash = body.contains("pub flash:");
+                    let axum_wrappers = render_axum_handler_wrappers(
+                        lc.name.0.as_str(),
+                        &flat_routes_2c,
+                        has_flash,
+                        sets_action_name,
+                    );
+                    let content = format!("{CONTROLLER_IMPORTS}{body}{ac_shim}{axum_wrappers}");
+                    files.push(EmittedFile {
+                        path: PathBuf::from(format!("src/controllers/{stem}.rs")),
+                        content,
+                    });
+                    controller_entries.push((stem, struct_name));
+                }
+            }
+            if !controller_entries.is_empty() {
+                files.extend(emit_controllers_mod_rs(&controller_entries));
+            }
+            // Augment src/models/mod.rs entries with the synthesized
+            // params classes. emit_models_mod_rs already emitted earlier
+            // — re-emit if there are params classes. (Idempotent: we
+            // simply replace the previous models/mod.rs in `files` by
+            // appending; the EmittedFile path is unique-keyed by emitters
+            // downstream — last write wins for files w/ same path.)
+            if !model_param_entries.is_empty() {
+                let mut all_models = model_lcs.clone();
+                // Wrap synthesized entries as fake LibraryClasses with
+                // just the name so the existing aggregator helper works.
+                // Already emitted as files; just need them indexed in
+                // mod.rs.
+                for (stem, class_name) in &model_param_entries {
+                    use crate::dialect::LibraryClass;
+                    use crate::ident::ClassId;
+                    all_models.push(LibraryClass {
+                        name: ClassId(crate::ident::Symbol::from(class_name.as_str())),
+                        is_module: false,
+                        parent: None,
+                        parent_span: Default::default(),
+                        includes: Vec::new(),
+                        methods: Vec::new(),
+                        nullable_columns: Vec::new(),
+                        origin: None,
+                        constants: Vec::new(),
+                        unknown_calls: Vec::new(),
+                        class_ivar_initializers: Vec::new(),
+                    });
+                    let _ = stem;
+                }
+                files.extend(emit_models_mod_rs(&all_models));
+            }
+        }
+
+        // Fixtures — each `<Resource>Fixtures` LibraryClass becomes one
+        // file under `src/fixtures/`. The aggregator `src/fixtures/mod.rs`
+        // declares them so the test harness can reach `ArticleFixtures::
+        // load(...)` style methods.
+        if !fixture_lcs.is_empty() {
+            let mut fixture_entries: Vec<(String, String)> = Vec::new();
+            for lc in &fixture_lcs {
+                let raw = lc.name.0.as_str();
+                let struct_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
+                let stem = crate::naming::snake_case(
+                    struct_name.strip_suffix("Fixtures").unwrap_or(&struct_name),
                 );
-                // Rails' `action_name`. The lowered dispatcher calls
-                // `assign_action_name` only in a controller that reads
-                // `action_name`, so only that controller gets the field
-                // and the two methods. The other controllers emit as
-                // before.
-                let sets_action_name = lc_calls_method(lc, "assign_action_name");
-                let (body, ac_shim) = if sets_action_name {
-                    (with_action_name_field(&body, &struct_name), ac_shim + &action_name_shim(&struct_name))
-                } else {
-                    (body, ac_shim)
+                let body = match library::emit_library_class(lc) {
+                    Ok(s) => s,
+                    Err(e) => emit_failure_stub(&format!("fixture `{}`", lc.name.0.as_str()), &e),
                 };
-                // Does this controller carry a `flash` field? Only
-                // controllers that read `self.flash` for view display
-                // (index/show/…) get one (see `collect_ivar_types`);
-                // redirect-only controllers like CommentsController
-                // don't. The wrapper loads the incoming flash cookie
-                // into `c.flash` only when the field exists; the
-                // outgoing path is field-independent (thread-local).
-                let has_flash = body.contains("pub flash:");
-                let axum_wrappers = render_axum_handler_wrappers(
-                    lc.name.0.as_str(),
-                    &flat_routes_2c,
-                    has_flash,
-                    sets_action_name,
-                );
-                let content = format!("{CONTROLLER_IMPORTS}{body}{ac_shim}{axum_wrappers}");
+                // Wedge 2c.3: bare-fn compat shim for per-fixture-module
+                // access (`fixtures::articles::one()`). Legacy-emit
+                // controller tests reach fixtures by-label this way;
+                // rust's lowered shape exposes them as
+                // `ArticlesFixtures::one()`. Append delegating wrappers
+                // for each non-`_fixtures_load!` label method so both
+                // shapes resolve. Skips Class-receiver special methods
+                // (the `_fixtures_load_bang` synthesized seed) — those
+                // aren't getters and don't need bare wrappers.
+                let bare_wrappers = render_fixture_bare_wrappers(lc, &struct_name);
+                // Fixtures reference models; reuse MODEL_IMPORTS.
+                let content = format!("{MODEL_IMPORTS}{body}{bare_wrappers}");
                 files.push(EmittedFile {
-                    path: PathBuf::from(format!("src/controllers/{stem}.rs")),
+                    path: PathBuf::from(format!("src/fixtures/{stem}.rs")),
                     content,
                 });
-                controller_entries.push((stem, struct_name));
+                fixture_entries.push((stem, struct_name));
             }
+            files.push(emit_fixtures_mod_rs(&fixture_entries));
         }
-        if !controller_entries.is_empty() {
-            files.push(emit_controllers_mod_rs(&controller_entries));
-        }
-        // Augment src/models/mod.rs entries with the synthesized
-        // params classes. emit_models_mod_rs already emitted earlier
-        // — re-emit if there are params classes. (Idempotent: we
-        // simply replace the previous models/mod.rs in `files` by
-        // appending; the EmittedFile path is unique-keyed by emitters
-        // downstream — last write wins for files w/ same path.)
-        if !model_param_entries.is_empty() {
-            let mut all_models = model_lcs.clone();
-            // Wrap synthesized entries as fake LibraryClasses with
-            // just the name so the existing aggregator helper works.
-            // Already emitted as files; just need them indexed in
-            // mod.rs.
-            for (stem, struct_name) in &model_param_entries {
-                use crate::dialect::LibraryClass;
-                use crate::ident::ClassId;
-                all_models.push(LibraryClass {
-                    name: ClassId(crate::ident::Symbol::from(struct_name.as_str())),
-                    is_module: false,
-                    parent: None,
-                    parent_span: Default::default(),
-                    includes: Vec::new(),
-                    methods: Vec::new(),
-                    nullable_columns: Vec::new(),
-                    origin: None,
-                    constants: Vec::new(),
-                    unknown_calls: Vec::new(),
-                    class_ivar_initializers: Vec::new(),
-                });
-                let _ = stem;
-            }
-            files.push(emit_models_mod_rs(&all_models));
-        }
-    }
 
-    // Fixtures — each `<Resource>Fixtures` LibraryClass becomes one
-    // file under `src/fixtures/`. The aggregator `src/fixtures/mod.rs`
-    // declares them so the test harness can reach `ArticleFixtures::
-    // load(...)` style methods.
-    if !fixture_lcs.is_empty() {
-        let mut fixture_entries: Vec<(String, String)> = Vec::new();
-        for lc in &fixture_lcs {
-            let raw = lc.name.0.as_str();
-            let struct_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
-            let stem = crate::naming::snake_case(
-                struct_name.strip_suffix("Fixtures").unwrap_or(&struct_name),
-            );
-            let body = match library::emit_library_class(lc) {
-                Ok(s) => s,
-                Err(e) => {
-                    emit_failure_stub(&format!("fixture `{}`", lc.name.0.as_str()), &e)
-                }
-            };
-            // Wedge 2c.3: bare-fn compat shim for per-fixture-module
-            // access (`fixtures::articles::one()`). Legacy-emit
-            // controller tests reach fixtures by-label this way;
-            // rust's lowered shape exposes them as
-            // `ArticlesFixtures::one()`. Append delegating wrappers
-            // for each non-`_fixtures_load!` label method so both
-            // shapes resolve. Skips Class-receiver special methods
-            // (the `_fixtures_load_bang` synthesized seed) — those
-            // aren't getters and don't need bare wrappers.
-            let bare_wrappers = render_fixture_bare_wrappers(lc, &struct_name);
-            // Fixtures reference models; reuse MODEL_IMPORTS.
-            let content = format!("{MODEL_IMPORTS}{body}{bare_wrappers}");
-            files.push(EmittedFile {
-                path: PathBuf::from(format!("src/fixtures/{stem}.rs")),
-                content,
-            });
-            fixture_entries.push((stem, struct_name));
-        }
-        files.push(emit_fixtures_mod_rs(&fixture_entries));
-    }
-
-    // Phase 6 wedge 3a (model tests) + wedge 2c.3 (controller tests).
-    // The two test categories take different emit paths:
-    //
-    // - Model tests go through `lower_test_modules_with_inner` +
-    //   `library::emit_module` (rust's generic lowered-IR path).
-    //   These were unblocked by wedge 3d's fixture/save/validation
-    //   plumbing.
-    //
-    // - Controller (`ActionDispatch::IntegrationTest`) tests reuse
-    //   the legacy rust target's `emit_rust_test_module`. That code
-    //   already has the axum-test rendering + the assert_response /
-    //   assert_select / assert_difference / assert_redirected_to
-    //   classifier dispatch the controller-test bodies need (~500
-    //   LOC at `src/emit/rust/spec.rs`); rather than duplicate it
-    //   here, expose it `pub(crate)` and call into it. Phase 7.2
-    //   relocates the legacy spec.rs into rust so the
-    //   `pub(crate) mod spec` hatch retires.
-    //
-    // Phase 7.1 (2026-05-20): tests emit by default. The
-    // `ROUNDHOUSE_RUST_V2_EMIT_TESTS=0` env var keeps an opt-out
-    // for environments that don't want the test surface compiled
-    // in (e.g. release-only builds that elide axum-test). Previous
-    // opt-in semantics are retired now that the test surface is
-    // green.
-    let emit_tests_enabled =
-        std::env::var("ROUNDHOUSE_RUST_V2_EMIT_TESTS").as_deref() != Ok("0");
-    let model_test_modules: Vec<crate::dialect::TestModule> = if emit_tests_enabled {
-        app.test_modules
-            .iter()
-            .filter(|tm| {
-                let parent = tm.parent.as_ref().map(|c| c.0.as_str()).unwrap_or("");
-                !parent.contains("IntegrationTest")
-            })
-            .cloned()
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let controller_test_modules: Vec<crate::dialect::TestModule> = if emit_tests_enabled {
-        app.test_modules
-            .iter()
-            .filter(|tm| {
-                let parent = tm.parent.as_ref().map(|c| c.0.as_str()).unwrap_or("");
-                parent.contains("IntegrationTest")
-            })
-            .cloned()
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    if !model_test_modules.is_empty() {
-        let mut test_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
-            model_registry.clone().into_iter().collect();
-        test_extras.extend(crate::lower::library_extras::extras_from_lcs(&fixture_lcs));
-        test_extras.extend(crate::lower::library_extras::extras_from_funcs(&route_helper_funcs));
-
-        let test_lowered = crate::lower::lower_test_modules_with_inner(
-            &model_test_modules,
-            &app.fixtures,
-            &app.models,
-            test_extras,
-            &crate::lower::routes::helper_id_segments(app),
-        );
-
-        let mut test_entries: Vec<(String, String)> = Vec::new();
-        for lowered in &test_lowered {
-            let mut lc = lowered.test_class.clone();
-            let class_name = lc.name.0.as_str().to_string();
-            let stem_raw = class_name.strip_suffix("Test").unwrap_or(&class_name);
-            let stem = crate::naming::snake_case(stem_raw);
-
-            // Rewrite Instance methods to Class so `emit_module`
-            // produces free `pub fn`s — Rust's `#[test]` discovery
-            // requires module-scope fns, not associated fns inside an
-            // `impl`. Helpers (non-test methods on the test class) ride
-            // along with the same flip; they become free fns reachable
-            // by tests in the same file.
-            for m in &mut lc.methods {
-                m.receiver = crate::dialect::MethodReceiver::Class;
-            }
-
-            let mut tmp_lcs = vec![lc];
-            let registry = crate::emit::rust::decide::str_color::build_registry(&tmp_lcs, &[]);
-            crate::emit::rust::decide::str_color::color_classes(&mut tmp_lcs, &registry);
-            crate::analyze::mutates_self::propagate(&mut tmp_lcs);
-            crate::analyze::block_refine::propagate(&mut tmp_lcs);
-            decide::decide_classes(&mut tmp_lcs);
-            let lc = tmp_lcs.into_iter().next().unwrap();
-
-            let body = match library::emit_module(&lc.methods) {
-                Ok(s) => s,
-                Err(e) => emit_failure_stub(&format!("test `{class_name}`"), &e),
-            };
-
-            // Prepend `#[test]` before each `pub fn test_*` — helpers
-            // (anything not starting with `test_`) get no attribute.
-            //
-            // Also inject `crate::fixtures::setup();` as the first
-            // statement of every test body. Rust's `#[test]` has no
-            // Minitest-`setup`-style per-test hook; the harness entry
-            // point lives in `src/fixtures/mod.rs` and each test must
-            // call it before touching the DB. The legacy `src/emit/
-            // rust/spec.rs` does the same prepend at line 441; this
-            // mirrors that without a body-level synthesis pass.
-            let with_attrs: String = body
-                .lines()
-                .map(|line| {
-                    if line.starts_with("pub fn test_") {
-                        format!("#[test]\n{line}\n        crate::fixtures::setup();")
-                    } else {
-                        line.to_string()
-                    }
+        // Phase 6 wedge 3a (model tests) + wedge 2c.3 (controller tests).
+        // The two test categories take different emit paths:
+        //
+        // - Model tests go through `lower_test_modules_with_inner` +
+        //   `library::emit_module` (rust's generic lowered-IR path).
+        //   These were unblocked by wedge 3d's fixture/save/validation
+        //   plumbing.
+        //
+        // - Controller (`ActionDispatch::IntegrationTest`) tests reuse
+        //   the legacy rust target's `emit_rust_test_module`. That code
+        //   already has the axum-test rendering + the assert_response /
+        //   assert_select / assert_difference / assert_redirected_to
+        //   classifier dispatch the controller-test bodies need (~500
+        //   LOC at `src/emit/rust/spec.rs`); rather than duplicate it
+        //   here, expose it `pub(crate)` and call into it. Phase 7.2
+        //   relocates the legacy spec.rs into rust so the
+        //   `pub(crate) mod spec` hatch retires.
+        //
+        // Phase 7.1 (2026-05-20): tests emit by default. The
+        // `ROUNDHOUSE_RUST_V2_EMIT_TESTS=0` env var keeps an opt-out
+        // for environments that don't want the test surface compiled
+        // in (e.g. release-only builds that elide axum-test). Previous
+        // opt-in semantics are retired now that the test surface is
+        // green.
+        let emit_tests_enabled =
+            std::env::var("ROUNDHOUSE_RUST_V2_EMIT_TESTS").as_deref() != Ok("0");
+        let model_test_modules: Vec<crate::dialect::TestModule> = if emit_tests_enabled {
+            app.test_modules
+                .iter()
+                .filter(|tm| {
+                    let parent = tm.parent.as_ref().map(|c| c.0.as_str()).unwrap_or("");
+                    !parent.contains("IntegrationTest")
                 })
-                .collect::<Vec<_>>()
-                .join("\n");
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let controller_test_modules: Vec<crate::dialect::TestModule> = if emit_tests_enabled {
+            app.test_modules
+                .iter()
+                .filter(|tm| {
+                    let parent = tm.parent.as_ref().map(|c| c.0.as_str()).unwrap_or("");
+                    parent.contains("IntegrationTest")
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
 
-            // Inner helper classes declared inline in the test file — a
-            // non-test model/controller paired with the `*Test` class
-            // (`Article < ActiveRecord::Base` in view_helpers_test,
-            // `TestController < ActionController::Base` in base_test).
-            // Ingest lifts them onto the module's `inner_classes`; emit
-            // them into the same file, above the test body, so its
-            // references resolve. Same companion-hoist the kotlin
-            // (`dc25f49`), swift, typescript and crystal gates do.
-            let mut inners = String::new();
-            for inner in &lowered.inner_classes {
-                let mut tmp = vec![inner.clone()];
-                let registry =
-                    crate::emit::rust::decide::str_color::build_registry(&tmp, &[]);
-                crate::emit::rust::decide::str_color::color_classes(&mut tmp, &registry);
-                crate::analyze::mutates_self::propagate(&mut tmp);
-                crate::analyze::block_refine::propagate(&mut tmp);
-                decide::decide_classes(&mut tmp);
-                let inner = tmp.into_iter().next().unwrap();
-                match library::emit_library_class(&inner) {
-                    Ok(s) => inners.push_str(&s),
-                    Err(e) => inners.push_str(&emit_failure_stub(
-                        &format!("inner class `{}`", inner.name.0.as_str()),
-                        &e,
-                    )),
+        if !model_test_modules.is_empty() {
+            let mut test_extras: Vec<(crate::ident::ClassId, crate::analyze::ClassInfo)> =
+                model_registry.clone().into_iter().collect();
+            test_extras.extend(crate::lower::library_extras::extras_from_lcs(&fixture_lcs));
+            test_extras.extend(crate::lower::library_extras::extras_from_funcs(
+                &route_helper_funcs,
+            ));
+
+            let test_lowered = crate::lower::lower_test_modules_with_inner(
+                &model_test_modules,
+                &app.fixtures,
+                &app.models,
+                test_extras,
+                &crate::lower::routes::helper_id_segments(app),
+            );
+
+            let mut test_entries: Vec<(String, String)> = Vec::new();
+            for lowered in &test_lowered {
+                let mut lc = lowered.test_class.clone();
+                let class_name = lc.name.0.as_str().to_string();
+                let stem_raw = class_name.strip_suffix("Test").unwrap_or(&class_name);
+                let stem = crate::naming::underscore(stem_raw);
+
+                // Rewrite Instance methods to Class so `emit_module`
+                // produces free `pub fn`s — Rust's `#[test]` discovery
+                // requires module-scope fns, not associated fns inside an
+                // `impl`. Helpers (non-test methods on the test class) ride
+                // along with the same flip; they become free fns reachable
+                // by tests in the same file.
+                for m in &mut lc.methods {
+                    m.receiver = crate::dialect::MethodReceiver::Class;
                 }
-                inners.push('\n');
-            }
 
-            // Class-body constants (`TABLE = [...]` in router_test) lift
-            // to module scope: Rust has no class body to hold them, and
-            // the test fns that read them are free fns in this module.
-            let mut consts = String::new();
-            for (name, value) in &lowered.constants {
-                consts.push_str(&format!(
-                    "#[allow(dead_code)]\nstatic {}: std::sync::LazyLock<{}> = \
+                let mut tmp_lcs = vec![lc];
+                let registry = crate::emit::rust::decide::str_color::build_registry(&tmp_lcs, &[]);
+                crate::emit::rust::decide::str_color::color_classes(&mut tmp_lcs, &registry);
+                crate::analyze::mutates_self::propagate(&mut tmp_lcs);
+                crate::analyze::block_refine::propagate(&mut tmp_lcs);
+                decide::decide_classes(&mut tmp_lcs);
+                let lc = tmp_lcs.into_iter().next().unwrap();
+
+                let body = match library::emit_module(&lc.methods) {
+                    Ok(s) => s,
+                    Err(e) => emit_failure_stub(&format!("test `{class_name}`"), &e),
+                };
+
+                // Prepend `#[test]` before each `pub fn test_*` — helpers
+                // (anything not starting with `test_`) get no attribute.
+                //
+                // Also inject `crate::fixtures::setup();` as the first
+                // statement of every test body. Rust's `#[test]` has no
+                // Minitest-`setup`-style per-test hook; the harness entry
+                // point lives in `src/fixtures/mod.rs` and each test must
+                // call it before touching the DB. The legacy `src/emit/
+                // rust/spec.rs` does the same prepend at line 441; this
+                // mirrors that without a body-level synthesis pass.
+                let with_attrs: String = body
+                    .lines()
+                    .map(|line| {
+                        if line.starts_with("pub fn test_") {
+                            format!("#[test]\n{line}\n        crate::fixtures::setup();")
+                        } else {
+                            line.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                // Inner helper classes declared inline in the test file — a
+                // non-test model/controller paired with the `*Test` class
+                // (`Article < ActiveRecord::Base` in view_helpers_test,
+                // `TestController < ActionController::Base` in base_test).
+                // Ingest lifts them onto the module's `inner_classes`; emit
+                // them into the same file, above the test body, so its
+                // references resolve. Same companion-hoist the kotlin
+                // (`dc25f49`), swift, typescript and crystal gates do.
+                let mut inners = String::new();
+                for inner in &lowered.inner_classes {
+                    let mut tmp = vec![inner.clone()];
+                    let registry = crate::emit::rust::decide::str_color::build_registry(&tmp, &[]);
+                    crate::emit::rust::decide::str_color::color_classes(&mut tmp, &registry);
+                    crate::analyze::mutates_self::propagate(&mut tmp);
+                    crate::analyze::block_refine::propagate(&mut tmp);
+                    decide::decide_classes(&mut tmp);
+                    let inner = tmp.into_iter().next().unwrap();
+                    match library::emit_library_class(&inner) {
+                        Ok(s) => inners.push_str(&s),
+                        Err(e) => inners.push_str(&emit_failure_stub(
+                            &format!("inner class `{}`", inner.name.0.as_str()),
+                            &e,
+                        )),
+                    }
+                    inners.push('\n');
+                }
+
+                // Class-body constants (`TABLE = [...]` in router_test) lift
+                // to module scope: Rust has no class body to hold them, and
+                // the test fns that read them are free fns in this module.
+                let mut consts = String::new();
+                for (name, value) in &lowered.constants {
+                    consts.push_str(&format!(
+                        "#[allow(dead_code)]\nstatic {}: std::sync::LazyLock<{}> = \
                      std::sync::LazyLock::new(|| {});\n",
-                    name.as_str(),
-                    value
-                        .ty
-                        .as_ref()
-                        .map(crate::emit::rust::ty::rust_ty)
-                        .unwrap_or_else(|| "String".to_string()),
-                    expr::emit_expr(value),
-                ));
-            }
+                        name.as_str(),
+                        value
+                            .ty
+                            .as_ref()
+                            .map(crate::emit::rust::ty::rust_ty)
+                            .unwrap_or_else(|| "String".to_string()),
+                        expr::emit_expr(value),
+                    ));
+                }
 
-            let content = format!(
-                "{MODEL_IMPORTS}\n\
+                let content = format!(
+                    "{MODEL_IMPORTS}\n\
                  #[allow(unused_imports)]\n\
                  use crate::fixtures::*;\n\
                  {FRAMEWORK_TEST_IMPORTS}\
                  {consts}\
                  {inners}\
                  {with_attrs}\n"
-            );
-            files.push(EmittedFile {
-                path: PathBuf::from(format!("src/tests/{stem}.rs")),
-                content,
-            });
-            test_entries.push((stem, class_name));
+                );
+                files.push(EmittedFile {
+                    path: PathBuf::from(format!("src/tests/{stem}.rs")),
+                    content,
+                });
+                test_entries.push((stem, class_name));
+            }
+
+            if !test_entries.is_empty() {
+                files.extend(emit_tests_mod_rs(&test_entries));
+            }
         }
 
-        if !test_entries.is_empty() {
-            files.push(emit_tests_mod_rs(&test_entries));
-        }
-    }
-
-    // Wedge 2c.3: route IntegrationTest-parented modules through
-    // the legacy controller-test emit (`emit_rust_test_module`).
-    // Each module becomes one `src/tests/<snake>.rs` file with
-    // `#[tokio::test(flavor = "multi_thread")]` async fns; the
-    // emit walks each Ruby test body and renders to axum-test +
-    // `TestResponseExt` calls. Aggregator entries are appended to
-    // the same `test_entries` list so `src/tests/mod.rs` declares
-    // both categories.
-    if !controller_test_modules.is_empty() {
-        let mut ctrl_entries: Vec<(String, String)> = Vec::new();
-        for tm in &controller_test_modules {
-            let file = spec::emit_rust_test_module(tm, app);
-            let class_name = tm.name.0.as_str().to_string();
-            let stem = file
-                .path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
-            files.push(file);
-            ctrl_entries.push((stem, class_name));
-        }
-        if !ctrl_entries.is_empty() {
-            // Append to whatever model-test entries already produced
-            // a `src/tests/mod.rs`. emit_tests_mod_rs sorts + dedups;
-            // a second call with the union supersedes (last-write-wins
-            // on the same `path` key).
-            let mut combined: Vec<(String, String)> = Vec::new();
-            for f in &files {
-                if f.path.to_string_lossy().starts_with("src/tests/")
-                    && f.path.extension().and_then(|s| s.to_str()) == Some("rs")
-                {
-                    if let Some(stem) = f.path.file_stem().and_then(|s| s.to_str()) {
-                        if stem != "mod" {
-                            combined.push((
-                                stem.to_string(),
-                                stem.to_string(), // class-name unused by the aggregator
-                            ));
+        // Wedge 2c.3: route IntegrationTest-parented modules through
+        // the legacy controller-test emit (`emit_rust_test_module`).
+        // Each module becomes one `src/tests/<snake>.rs` file with
+        // `#[tokio::test(flavor = "multi_thread")]` async fns; the
+        // emit walks each Ruby test body and renders to axum-test +
+        // `TestResponseExt` calls. Aggregator entries are appended to
+        // the same `test_entries` list so `src/tests/mod.rs` declares
+        // both categories.
+        if !controller_test_modules.is_empty() {
+            let mut ctrl_entries: Vec<(String, String)> = Vec::new();
+            for tm in &controller_test_modules {
+                let file = spec::emit_rust_test_module(tm, app);
+                let class_name = tm.name.0.as_str().to_string();
+                let stem = crate::naming::underscore(
+                    tm.name
+                        .0
+                        .as_str()
+                        .strip_suffix("Test")
+                        .unwrap_or(tm.name.0.as_str()),
+                );
+                files.push(file);
+                ctrl_entries.push((stem, class_name));
+            }
+            if !ctrl_entries.is_empty() {
+                // Append to whatever model-test entries already produced
+                // a `src/tests/mod.rs`. emit_tests_mod_rs sorts + dedups;
+                // a second call with the union supersedes (last-write-wins
+                // on the same `path` key).
+                let mut combined: Vec<(String, String)> = Vec::new();
+                for f in &files {
+                    if f.path.to_string_lossy().starts_with("src/tests/")
+                        && f.path.extension().and_then(|s| s.to_str()) == Some("rs")
+                    {
+                        if let Ok(relative) = f.path.strip_prefix("src/tests") {
+                            if let Some(relative) = relative.to_str() {
+                                let stem = relative.strip_suffix(".rs").unwrap_or(relative);
+                                if stem != "mod" && !stem.ends_with("/mod") {
+                                    combined.push((
+                                        stem.to_string(),
+                                        stem.to_string(), // class-name unused by the aggregator
+                                    ));
+                                }
+                            }
                         }
                     }
                 }
+                files.extend(emit_tests_mod_rs(&combined));
             }
-            files.push(emit_tests_mod_rs(&combined));
         }
-    }
     }); // end with_global_class_methods
 
     // Empty aggregators for the module trio every emitted TEST file
@@ -1445,8 +1575,14 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                 });
             }
         };
-        stub("src/models/mod.rs", "// Generated by Roundhouse (rust2). No models in this app.\n");
-        stub("src/views/mod.rs", "// Generated by Roundhouse (rust2). No views in this app.\n");
+        stub(
+            "src/models/mod.rs",
+            "// Generated by Roundhouse (rust2). No models in this app.\n",
+        );
+        stub(
+            "src/views/mod.rs",
+            "// Generated by Roundhouse (rust2). No views in this app.\n",
+        );
         // A no-op `setup()`: with no fixtures there is no schema to
         // create and nothing to load, but the call site is emitted
         // unconditionally, so the function has to exist.
@@ -1487,15 +1623,21 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
 /// Does a method of `lc` call `method` on `self`?
 fn lc_calls_method(lc: &crate::dialect::LibraryClass, method: &str) -> bool {
     fn walk(e: &crate::expr::Expr, method: &str) -> bool {
-        if let crate::expr::ExprNode::Send { recv, method: m, .. } = &*e.node {
+        if let crate::expr::ExprNode::Send {
+            recv, method: m, ..
+        } = &*e.node
+        {
             if m.as_str() == method
-                && recv.as_ref().is_none_or(|r| matches!(&*r.node, crate::expr::ExprNode::SelfRef))
+                && recv
+                    .as_ref()
+                    .is_none_or(|r| matches!(&*r.node, crate::expr::ExprNode::SelfRef))
             {
                 return true;
             }
         }
         let mut found = false;
-        e.node.for_each_child(&mut |c| found = found || walk(c, method));
+        e.node
+            .for_each_child(&mut |c| found = found || walk(c, method));
         found
     }
     lc.methods.iter().any(|m| walk(&m.body, method))
@@ -1559,6 +1701,7 @@ fn render_axum_handler_wrappers(
     sets_action_name: bool,
 ) -> String {
     use crate::dialect::HttpMethod;
+    let emitted_type = crate::naming::demodulize(controller_name);
     // Dedup by action — Rails' `root "articles#index"` and
     // `resources :articles` both target `ArticlesController#index`,
     // and `resources :articles, only: [:index]` may even register
@@ -1582,7 +1725,11 @@ fn render_axum_handler_wrappers(
     );
     for r in routes {
         let action = r.action.as_str();
-        let method_name = if action == "new" { "new_action" } else { action };
+        let method_name = if action == "new" {
+            "new_action"
+        } else {
+            action
+        };
         let path_params = &r.path_params;
         let has_body = matches!(
             r.method,
@@ -1601,10 +1748,7 @@ fn render_axum_handler_wrappers(
                 param = path_params[0],
             ),
             n => {
-                let names: Vec<String> = path_params
-                    .iter()
-                    .map(|p| format!("{p}_raw"))
-                    .collect();
+                let names: Vec<String> = path_params.iter().map(|p| format!("{p}_raw")).collect();
                 let tys = vec!["String"; n].join(", ");
                 format!(
                     "axum::extract::Path(({names})): axum::extract::Path<({tys})>",
@@ -1674,12 +1818,10 @@ fn render_axum_handler_wrappers(
         }
         if has_body || !path_params.is_empty() {
             body.push_str(&format!(
-                "    let mut c = {controller_name} {{ params, ..Default::default() }};\n",
+                "    let mut c = {emitted_type} {{ params, ..Default::default() }};\n",
             ));
         } else {
-            body.push_str(&format!(
-                "    let mut c = {controller_name}::default();\n",
-            ));
+            body.push_str(&format!("    let mut c = {emitted_type}::default();\n",));
         }
         // Load the incoming flash into the controller's `flash` field so
         // views render `notice` / `alert` exactly once (the cookie is
@@ -1697,8 +1839,12 @@ fn render_axum_handler_wrappers(
         // action set (FLASH_OUT) onto a Set-Cookie — empty clears it, so
         // a shown notice doesn't stick. Field-independent, so every
         // controller (including redirect-only ones) persists its flash.
-        body.push_str("    let mut __resp = crate::http::response_into_axum(crate::http::response_take());\n");
-        body.push_str("    crate::http::apply_flash_cookie(&mut __resp, &crate::http::flash_out_take());\n");
+        body.push_str(
+            "    let mut __resp = crate::http::response_into_axum(crate::http::response_take());\n",
+        );
+        body.push_str(
+            "    crate::http::apply_flash_cookie(&mut __resp, &crate::http::flash_out_take());\n",
+        );
         body.push_str("    __resp\n");
 
         out.push_str(&format!(
@@ -1758,9 +1904,7 @@ fn render_axum_router_body(flat_routes: &[crate::lower::FlatRoute]) -> String {
         // the in-handler strip carries that case.
         let needs_json_mirror = !path.contains('{');
         if needs_json_mirror {
-            out.push_str(&format!(
-                "        .route(\"{path}.json\", {verbs})\n",
-            ));
+            out.push_str(&format!("        .route(\"{path}.json\", {verbs})\n",));
         }
     }
     // Attach the request-format layer at router-build time so both
@@ -1832,9 +1976,8 @@ fn axum_verb_fn(method: &crate::dialect::HttpMethod) -> &'static str {
 /// finding; `i64` survives only as the fallback for a param the
 /// signature does not name.
 fn render_route_helpers_bare_wrappers(lc: &crate::dialect::LibraryClass) -> String {
-    let mut out = String::from(
-        "\n// Wedge 2c.3 bare-fn compat shims — delegate to `impl RouteHelpers`.\n",
-    );
+    let mut out =
+        String::from("\n// Wedge 2c.3 bare-fn compat shims — delegate to `impl RouteHelpers`.\n");
     for m in &lc.methods {
         let name = m.name.as_str();
         // Skip non-public / synthetic helpers.
@@ -1882,14 +2025,9 @@ fn render_route_helpers_bare_wrappers(lc: &crate::dialect::LibraryClass) -> Stri
 /// Skips `_fixtures_load_bang` (the synthesized seed used by
 /// `crate::fixtures::setup()` only; not a per-record getter) and
 /// any private-prefixed helpers.
-fn render_fixture_bare_wrappers(
-    lc: &crate::dialect::LibraryClass,
-    struct_name: &str,
-) -> String {
+fn render_fixture_bare_wrappers(lc: &crate::dialect::LibraryClass, struct_name: &str) -> String {
     use crate::dialect::MethodReceiver;
-    let mut out = String::from(
-        "\n// Wedge 2c.3 bare-fn compat shims — delegate to the impl.\n",
-    );
+    let mut out = String::from("\n// Wedge 2c.3 bare-fn compat shims — delegate to the impl.\n");
     for m in &lc.methods {
         if !matches!(m.receiver, MethodReceiver::Class) {
             continue;
@@ -2055,7 +2193,12 @@ fn replace_transpiled_encode_datetime(content: &str) -> String {
     let replacement = "    pub fn encode_datetime<T: crate::rh_datetime::EncodeDatetime>(v: T) -> String {\n\
         \x20       v.rh_encode_datetime()\n\
         \x20   }";
-    format!("{}{}{}", &content[..line_start], replacement, &content[end + 1..])
+    format!(
+        "{}{}{}",
+        &content[..line_start],
+        replacement,
+        &content[end + 1..]
+    )
 }
 
 /// Build `src/lib.rs` from the set of files emitted so far, declaring
@@ -2064,7 +2207,10 @@ fn replace_transpiled_encode_datetime(content: &str) -> String {
 /// need dependency-aware ordering when modules `use` each other;
 /// alphabetical is fine for now.
 fn emit_lib_rs(emitted: &[EmittedFile]) -> EmittedFile {
-    let mut lines = vec!["// Generated by Roundhouse (rust2).".to_string(), String::new()];
+    let mut lines = vec![
+        "// Generated by Roundhouse (rust2).".to_string(),
+        String::new(),
+    ];
     let mut mods: Vec<String> = emitted
         .iter()
         .filter_map(|f| {
@@ -2072,7 +2218,7 @@ fn emit_lib_rs(emitted: &[EmittedFile]) -> EmittedFile {
             let rest = p.strip_prefix("src/")?;
             // Subdirectory module: `src/models/mod.rs` → `pub mod models;`.
             if let Some(subdir_stem) = rest.strip_suffix("/mod.rs") {
-                return Some(subdir_stem.to_string());
+                return (!subdir_stem.contains('/')).then(|| subdir_stem.to_string());
             }
             let stem = rest.strip_suffix(".rs")?;
             // Skip main + lib themselves.
@@ -2108,39 +2254,54 @@ fn emit_lib_rs(emitted: &[EmittedFile]) -> EmittedFile {
     }
 }
 
+fn emit_app_library_classes(lcs: &[crate::dialect::LibraryClass]) -> Vec<EmittedFile> {
+    let mut files = Vec::new();
+    let mut entries = Vec::new();
+    for lc in lcs {
+        let raw = lc.name.0.as_str();
+        let name = raw.rsplit("::").next().unwrap_or(raw).to_string();
+        let path = raw
+            .split("::")
+            .map(crate::naming::underscore)
+            .collect::<Vec<_>>()
+            .join("/");
+        let body = match library::emit_library_class(lc) {
+            Ok(body) => body,
+            Err(err) => emit_failure_stub(&format!("app class `{raw}`"), &err),
+        };
+        // A class can also be a namespace for nested classes (for example
+        // `Authentication` and `Authentication::Token`). Give class source
+        // files a distinct leaf module so they cannot collide with the
+        // namespace's `mod.rs`.
+        let class_path = path
+            .rsplit_once('/')
+            .map(|(parent, leaf)| format!("{parent}/{leaf}_class"))
+            .unwrap_or_else(|| format!("{path}_class"));
+        files.push(EmittedFile {
+            path: PathBuf::from(format!("src/app_classes/{class_path}.rs")),
+            content: format!("#[allow(unused_imports)]\nuse crate::app_classes::*;\n{body}"),
+        });
+        entries.push((class_path, name));
+    }
+    files.extend(emit_nested_mod_files("app_classes", &entries, true, true));
+    files
+}
+
 /// `src/models/mod.rs` aggregator — declares each emitted model
 /// file as `pub mod <stem>;` so `app::models::Article` etc. resolve
 /// from outside the directory.
-fn emit_models_mod_rs(lcs: &[crate::dialect::LibraryClass]) -> EmittedFile {
-    let mut lines = vec!["// Generated by Roundhouse (rust2).".to_string(), String::new()];
-    let mut entries: Vec<(String, String)> = lcs
+fn emit_models_mod_rs(lcs: &[crate::dialect::LibraryClass]) -> Vec<EmittedFile> {
+    let entries: Vec<(String, String)> = lcs
         .iter()
         .map(|lc| {
+            let raw = lc.name.0.as_str();
             (
-                crate::naming::snake_case(lc.name.0.as_str()),
-                lc.name.0.as_str().to_string(),
+                crate::naming::underscore(raw),
+                crate::naming::demodulize(raw).to_string(),
             )
         })
         .collect();
-    entries.sort();
-    entries.dedup();
-    // Two-pass emit: `pub mod <stem>;` then `pub use <stem>::<Name>;`.
-    // The re-export is what `MODEL_IMPORTS`' `use crate::models::*;`
-    // hits, so sibling files (article.rs) can name `Comment` without
-    // a `crate::models::comment::` path. Each per-file struct picks
-    // up the same glob, so cross-association code (`Comment::exists`
-    // in Comment's own belongs_to validate, `Vec<Comment>` in
-    // Article#comments) compiles without per-target use plumbing.
-    for (stem, _) in &entries {
-        lines.push(format!("pub mod {stem};"));
-    }
-    for (stem, name) in &entries {
-        lines.push(format!("pub use {stem}::{name};"));
-    }
-    EmittedFile {
-        path: PathBuf::from("src/models/mod.rs"),
-        content: lines.join("\n") + "\n",
-    }
+    emit_nested_mod_files("models", &entries, true, true)
 }
 
 /// `src/views/mod.rs` aggregator — same shape as `emit_models_mod_rs`:
@@ -2148,7 +2309,10 @@ fn emit_models_mod_rs(lcs: &[crate::dialect::LibraryClass]) -> EmittedFile {
 /// struct as `pub use <stem>::<Name>;` so `use crate::views::*;` in
 /// MODEL_IMPORTS pulls `Articles` / `Comments` / etc. into scope.
 fn emit_views_mod_rs(entries: &[(String, String)]) -> EmittedFile {
-    let mut lines = vec!["// Generated by Roundhouse (rust2).".to_string(), String::new()];
+    let mut lines = vec![
+        "// Generated by Roundhouse (rust2).".to_string(),
+        String::new(),
+    ];
     let mut entries = entries.to_vec();
     entries.sort();
     entries.dedup();
@@ -2179,7 +2343,10 @@ fn emit_views_mod_rs(entries: &[(String, String)]) -> EmittedFile {
 /// so cross-fixture FK refs and `<Plural>Fixtures::one()` lookups
 /// resolve without a runtime label→id map.
 fn emit_fixtures_mod_rs(entries: &[(String, String)]) -> EmittedFile {
-    let mut lines = vec!["// Generated by Roundhouse (rust2).".to_string(), String::new()];
+    let mut lines = vec![
+        "// Generated by Roundhouse (rust2).".to_string(),
+        String::new(),
+    ];
     let mut entries = entries.to_vec();
     entries.sort();
     entries.dedup();
@@ -2195,9 +2362,7 @@ fn emit_fixtures_mod_rs(entries: &[(String, String)]) -> EmittedFile {
     lines.push("/// order. Tests call this as their first line; repeat calls on".to_string());
     lines.push("/// the same thread reset to a clean slate.".to_string());
     lines.push("pub fn setup() {".to_string());
-    lines.push(
-        "    crate::db::setup_test_db(crate::schema_sql::CREATE_TABLES);".to_string(),
-    );
+    lines.push("    crate::db::setup_test_db(crate::schema_sql::CREATE_TABLES);".to_string());
     for (_, name) in &entries {
         lines.push(format!("    {name}::_fixtures_load_bang();"));
     }
@@ -2211,36 +2376,196 @@ fn emit_fixtures_mod_rs(entries: &[(String, String)]) -> EmittedFile {
 /// `src/tests/mod.rs` aggregator — declares each emitted test file
 /// as `pub mod <stem>;`. No `pub use` re-export (test files are
 /// reached only by the cfg(test) gate in lib.rs, not by name).
-fn emit_tests_mod_rs(entries: &[(String, String)]) -> EmittedFile {
-    let mut lines = vec!["// Generated by Roundhouse (rust2).".to_string(), String::new()];
-    let mut entries = entries.to_vec();
-    entries.sort();
-    entries.dedup();
-    for (stem, _) in &entries {
-        lines.push(format!("pub mod {stem};"));
-    }
-    EmittedFile {
-        path: PathBuf::from("src/tests/mod.rs"),
-        content: lines.join("\n") + "\n",
-    }
+fn emit_tests_mod_rs(entries: &[(String, String)]) -> Vec<EmittedFile> {
+    emit_nested_mod_files("tests", entries, false, false)
 }
 
 /// `src/controllers/mod.rs` aggregator — same shape as
 /// `emit_models_mod_rs` / `emit_views_mod_rs`.
-fn emit_controllers_mod_rs(entries: &[(String, String)]) -> EmittedFile {
-    let mut lines = vec!["// Generated by Roundhouse (rust2).".to_string(), String::new()];
+fn emit_controllers_mod_rs(entries: &[(String, String)]) -> Vec<EmittedFile> {
+    emit_nested_mod_files("controllers", entries, false, true)
+}
+
+fn emit_nested_mod_files(
+    area: &str,
+    entries: &[(String, String)],
+    root_reexports: bool,
+    nested_reexports: bool,
+) -> Vec<EmittedFile> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut tree: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut namespaces = BTreeSet::new();
     let mut entries = entries.to_vec();
     entries.sort();
     entries.dedup();
-    for (stem, _) in &entries {
-        lines.push(format!("pub mod {stem};"));
+    tree.entry(String::new()).or_default();
+    for (path, _) in &entries {
+        let parts: Vec<&str> = path.split('/').collect();
+        let mut parent = String::new();
+        for part in &parts[..parts.len().saturating_sub(1)] {
+            tree.entry(parent.clone())
+                .or_default()
+                .insert((*part).to_string());
+            parent = if parent.is_empty() {
+                (*part).to_string()
+            } else {
+                format!("{parent}/{part}")
+            };
+            namespaces.insert(parent.clone());
+            tree.entry(parent.clone()).or_default();
+        }
+        tree.entry(parent)
+            .or_default()
+            .insert(parts.last().unwrap().to_string());
     }
-    for (stem, name) in &entries {
-        lines.push(format!("pub use {stem}::{name};"));
+
+    tree.into_iter()
+        .map(|(parent, modules)| {
+            let mut lines = vec![
+                "// Generated by Roundhouse (rust2).".to_string(),
+                String::new(),
+            ];
+            for module in modules {
+                lines.push(format!("pub mod {module};"));
+                let child = if parent.is_empty() {
+                    module.clone()
+                } else {
+                    format!("{parent}/{module}")
+                };
+                if namespaces.contains(&child) && !(area == "app_classes" && parent.is_empty()) {
+                    lines.push(format!(
+                        "pub use self::{module} as {};",
+                        crate::naming::camelize(&module)
+                    ));
+                }
+            }
+            if (parent.is_empty() && root_reexports) || (!parent.is_empty() && nested_reexports) {
+                for (path, name) in &entries {
+                    let entry_parent = path.rsplit_once('/').map(|(p, _)| p).unwrap_or("");
+                    if entry_parent == parent {
+                        let leaf = path.rsplit('/').next().unwrap_or(path);
+                        lines.push(format!("pub use {leaf}::{name};"));
+                    }
+                }
+            }
+            if parent.is_empty() && root_reexports {
+                for (path, name) in &entries {
+                    if path.contains('/') {
+                        lines.push(format!("pub use {}::{name};", path.replace('/', "::")));
+                    }
+                }
+            }
+            let path = if parent.is_empty() {
+                format!("src/{area}/mod.rs")
+            } else {
+                format!("src/{area}/{parent}/mod.rs")
+            };
+            EmittedFile {
+                path: PathBuf::from(path),
+                content: lines.join("\n") + "\n",
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod nested_module_emit_tests {
+    use super::{emit_app_library_classes, emit_nested_mod_files};
+
+    #[test]
+    fn emits_app_library_classes_with_a_registered_module_and_cross_class_imports() {
+        let classes = crate::ingest::ingest_library_classes(
+            b"class Current\nend\nmodule ApplicationHelper\n  def self.avatar_img(name)\n    name\n  end\nend\n",
+            "app/classes.rb",
+        )
+        .expect("app support classes ingest");
+        let files = crate::emit::rust::expr::with_emit_ctx(super::EmitCtx::default(), || {
+            emit_app_library_classes(&classes)
+        });
+        let current = files
+            .iter()
+            .find(|file| file.path.to_string_lossy() == "src/app_classes/current_class.rs")
+            .expect("Current source");
+        let helper = files
+            .iter()
+            .find(|file| file.path.to_string_lossy() == "src/app_classes/application_helper_class.rs")
+            .expect("ApplicationHelper source");
+        let modules = files
+            .iter()
+            .find(|file| file.path.to_string_lossy() == "src/app_classes/mod.rs")
+            .expect("app class aggregator");
+
+        assert!(current.content.contains("pub struct Current"));
+        assert!(helper.content.contains("pub struct ApplicationHelper"));
+        assert!(helper.content.contains("use crate::app_classes::*;"));
+        assert!(modules.content.contains("pub mod application_helper_class;"));
+        assert!(
+            modules
+                .content
+                .contains("pub use application_helper_class::ApplicationHelper;")
+        );
+        assert!(modules.content.contains("pub use current_class::Current;"));
     }
-    EmittedFile {
-        path: PathBuf::from("src/controllers/mod.rs"),
-        content: lines.join("\n") + "\n",
+
+    #[test]
+    fn models_emit_valid_nested_modules_and_root_type_reexports() {
+        let emitted = emit_nested_mod_files(
+            "models",
+            &[("action_text/rich_text".into(), "RichText".into())],
+            true,
+            true,
+        );
+        let root = emitted
+            .iter()
+            .find(|file| file.path.to_string_lossy() == "src/models/mod.rs")
+            .unwrap();
+        let namespace = emitted
+            .iter()
+            .find(|file| file.path.to_string_lossy() == "src/models/action_text/mod.rs")
+            .unwrap();
+
+        assert!(root.content.contains("pub mod action_text;"));
+        assert!(
+            root.content
+                .contains("pub use self::action_text as ActionText;")
+        );
+        assert!(
+            root.content
+                .contains("pub use action_text::rich_text::RichText;")
+        );
+        assert!(namespace.content.contains("pub mod rich_text;"));
+        assert!(namespace.content.contains("pub use rich_text::RichText;"));
+    }
+
+    #[test]
+    fn namespaced_controller_module_reexports_controller_in_its_namespace() {
+        let emitted = emit_nested_mod_files(
+            "controllers",
+            &[("accounts/bots_controller".into(), "BotsController".into())],
+            false,
+            true,
+        );
+        let root = emitted
+            .iter()
+            .find(|file| file.path.to_string_lossy() == "src/controllers/mod.rs")
+            .unwrap();
+        let namespace = emitted
+            .iter()
+            .find(|file| file.path.to_string_lossy() == "src/controllers/accounts/mod.rs")
+            .unwrap();
+
+        assert!(root.content.contains("pub use self::accounts as Accounts;"));
+        assert!(
+            namespace
+                .content
+                .contains("pub use bots_controller::BotsController;")
+        );
+        assert!(
+            !root
+                .content
+                .contains("pub use accounts::bots_controller::BotsController;")
+        );
     }
 }
 
@@ -2254,14 +2579,10 @@ fn emit_controllers_mod_rs(entries: &[(String, String)]) -> EmittedFile {
 /// from `MethodDef.signature` when present; methods without a typed
 /// signature get an empty Tys vec and the Const-recv arity-pad path
 /// no-ops (same behavior as no entry).
-type GlobalMethodsMap = std::collections::HashMap<
-    String,
-    std::collections::HashMap<String, Vec<crate::ty::Param>>,
->;
-type GlobalDefaultsMap = std::collections::HashMap<
-    String,
-    std::collections::HashMap<String, Vec<Option<String>>>,
->;
+type GlobalMethodsMap =
+    std::collections::HashMap<String, std::collections::HashMap<String, Vec<crate::ty::Param>>>;
+type GlobalDefaultsMap =
+    std::collections::HashMap<String, std::collections::HashMap<String, Vec<Option<String>>>>;
 
 fn collect_global_class_methods(
     model_lcs: &[crate::dialect::LibraryClass],
@@ -2270,6 +2591,7 @@ fn collect_global_class_methods(
     view_lcs: &[crate::dialect::LibraryClass],
     controller_lcs: &[crate::dialect::LibraryClass],
     fixture_lcs: &[crate::dialect::LibraryClass],
+    app_lcs: &[crate::dialect::LibraryClass],
     runtime_lcs: &[crate::dialect::LibraryClass],
 ) -> EmitCtx {
     use crate::dialect::LibraryClass;
@@ -2362,6 +2684,9 @@ fn collect_global_class_methods(
         collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
     }
     for lc in fixture_lcs {
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
+    }
+    for lc in app_lcs {
         collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
     }
     // Framework runtime LCs (ViewHelpers, JsonBuilder, Inflector,

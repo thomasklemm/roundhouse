@@ -10,7 +10,7 @@ use std::fmt::Write;
 use super::method::{emit_instance_method, emit_module_method};
 use super::ty::rust_ty;
 use crate::dialect::{LibraryClass, MethodDef, MethodReceiver};
-use crate::expr::{Expr, ExprNode, Literal, LValue};
+use crate::expr::{Expr, ExprNode, LValue, Literal};
 use crate::ty::Ty;
 
 /// Module mode — flat list of `def self.*` helpers (e.g.
@@ -203,7 +203,8 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // still work alongside; Rust disambiguates field vs method
     // by trailing parens at the call site.
     for (fname, ty) in &ivars {
-        writeln!(out, "    pub {fname}: {},", rust_ty(ty)).unwrap();
+        let field = super::expr::util::escape_rust_keyword(fname);
+        writeln!(out, "    pub {field}: {},", rust_ty(ty)).unwrap();
     }
     out.push_str("}\n\n");
 
@@ -221,44 +222,42 @@ pub fn emit_library_class(class: &LibraryClass) -> Result<String, String> {
     // commonly `self.body = ""` where field is `String` and `""` is
     // `&str`. Empty outside class-body scope; scoped per-class to
     // prevent bleeding between siblings.
-    let ivar_type_map: std::collections::HashMap<String, Ty> =
-        ivars.iter().cloned().collect();
+    let ivar_type_map: std::collections::HashMap<String, Ty> = ivars.iter().cloned().collect();
     let class_method_param_tys = collect_class_method_param_tys(&class.methods);
-    let body_result = super::expr::with_class_method_param_tys(class_method_param_tys, || super::expr::with_ivar_types(ivar_type_map, || super::expr::with_static_methods(static_method_names.clone(), || {
-        for m in &class.methods {
-            if !first {
-                writeln!(out).unwrap();
-            }
-            first = false;
-            let body = match m.receiver {
-                MethodReceiver::Class => {
-                    // `def self.X` → `pub fn X(...)` with no receiver.
-                    // Module-style call from within the impl block.
-                    super::method::emit_module_method(m)?
+    let body_result = super::expr::with_class_method_param_tys(class_method_param_tys, || {
+        super::expr::with_ivar_types(ivar_type_map, || {
+            super::expr::with_static_methods(static_method_names.clone(), || {
+                for m in &class.methods {
+                    if !first {
+                        writeln!(out).unwrap();
+                    }
+                    first = false;
+                    let body = match m.receiver {
+                        MethodReceiver::Class => {
+                            // `def self.X` → `pub fn X(...)` with no receiver.
+                            // Module-style call from within the impl block.
+                            super::method::emit_module_method(m)?
+                        }
+                        MethodReceiver::Instance => {
+                            let is_static = static_method_names.contains(m.name.as_str());
+                            let mutates = mutating_methods.contains(m.name.as_str());
+                            emit_instance_method(m, mutates, is_static, &name, &ivars)?
+                        }
+                    };
+                    for line in body.lines() {
+                        if line.is_empty() {
+                            writeln!(out).unwrap();
+                        } else {
+                            writeln!(out, "    {line}").unwrap();
+                        }
+                    }
                 }
-                MethodReceiver::Instance => {
-                    let is_static = static_method_names.contains(m.name.as_str());
-                    let mutates = mutating_methods.contains(m.name.as_str());
-                    emit_instance_method(m, mutates, is_static, &name, &ivars)?
-                }
-            };
-            for line in body.lines() {
-                if line.is_empty() {
-                    writeln!(out).unwrap();
-                } else {
-                    writeln!(out, "    {line}").unwrap();
-                }
-            }
-        }
-        Ok::<(), String>(())
-    })));
+                Ok::<(), String>(())
+            })
+        })
+    });
     body_result?;
-    if name == "Base"
-        && class
-            .methods
-            .iter()
-            .any(|m| m.name.as_str() == "render")
-    {
+    if name == "Base" && class.methods.iter().any(|m| m.name.as_str() == "render") {
         // 2-arg `self.render(body, opts)` rewrites to `render_with`.
         // Controller subclasses get that shim from rust.rs; Base
         // itself must unpack opts onto its 4-arg `render`.
@@ -372,34 +371,35 @@ fn emit_module_singleton(
         out.push('\n');
     }
     writeln!(out, "impl {name} {{").unwrap();
-    let ivar_type_map: std::collections::HashMap<String, Ty> =
-        ivars.iter().cloned().collect();
+    let ivar_type_map: std::collections::HashMap<String, Ty> = ivars.iter().cloned().collect();
     let class_method_param_tys = collect_class_method_param_tys(&class.methods);
-    let body_result = super::expr::with_class_method_param_tys(class_method_param_tys, || super::expr::with_module_singleton(true, thread_local, || {
-        super::expr::with_ivar_types(ivar_type_map, || {
-            let mut first = true;
-            for m in &class.methods {
-                if matches!(m.name.as_str(), "[]" | "[]=") {
-                    continue;
-                }
-                if !first {
-                    writeln!(out).unwrap();
-                }
-                first = false;
-                // Module-singleton methods are class methods by
-                // construction (detection in `emit_library_class`).
-                let body = super::method::emit_module_method(m)?;
-                for line in body.lines() {
-                    if line.is_empty() {
+    let body_result = super::expr::with_class_method_param_tys(class_method_param_tys, || {
+        super::expr::with_module_singleton(true, thread_local, || {
+            super::expr::with_ivar_types(ivar_type_map, || {
+                let mut first = true;
+                for m in &class.methods {
+                    if matches!(m.name.as_str(), "[]" | "[]=") {
+                        continue;
+                    }
+                    if !first {
                         writeln!(out).unwrap();
-                    } else {
-                        writeln!(out, "    {line}").unwrap();
+                    }
+                    first = false;
+                    // Module-singleton methods are class methods by
+                    // construction (detection in `emit_library_class`).
+                    let body = super::method::emit_module_method(m)?;
+                    for line in body.lines() {
+                        if line.is_empty() {
+                            writeln!(out).unwrap();
+                        } else {
+                            writeln!(out, "    {line}").unwrap();
+                        }
                     }
                 }
-            }
-            Ok::<(), String>(())
+                Ok::<(), String>(())
+            })
         })
-    }));
+    });
     body_result?;
     out.push_str("}\n");
     Ok(out)
@@ -422,7 +422,9 @@ fn is_raise_only_body(body: &Expr) -> bool {
         )
     }
     match &*body.node {
-        ExprNode::Send { recv: None, method, .. } if method.as_str() == "raise" => true,
+        ExprNode::Send {
+            recv: None, method, ..
+        } if method.as_str() == "raise" => true,
         ExprNode::Seq { exprs } if exprs.len() == 1 => is_raise_send(&exprs[0]),
         _ => false,
     }
@@ -441,23 +443,33 @@ fn method_reads_self(body: &Expr) -> bool {
                     return true;
                 }
                 if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
-                    if walk(recv) { return true; }
+                    if walk(recv) {
+                        return true;
+                    }
                 }
                 walk(value)
             }
             ExprNode::Seq { exprs } => exprs.iter().any(walk),
-            ExprNode::If { cond, then_branch, else_branch } => {
-                walk(cond) || walk(then_branch) || walk(else_branch)
-            }
+            ExprNode::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => walk(cond) || walk(then_branch) || walk(else_branch),
             ExprNode::While { cond, body, .. } => walk(cond) || walk(body),
-            ExprNode::Send { recv, args, block, .. } => {
+            ExprNode::Send {
+                recv, args, block, ..
+            } => {
                 recv.as_ref().map(|r| walk(r)).unwrap_or(false)
                     || args.iter().any(walk)
                     || block.as_ref().map(|b| walk(b)).unwrap_or(false)
             }
             ExprNode::Return { value } => walk(value),
             ExprNode::StringInterp { parts } => parts.iter().any(|p| {
-                if let crate::expr::InterpPart::Expr { expr } = p { walk(expr) } else { false }
+                if let crate::expr::InterpPart::Expr { expr } = p {
+                    walk(expr)
+                } else {
+                    false
+                }
             }),
             ExprNode::Hash { entries, .. } => entries.iter().any(|(k, v)| walk(k) || walk(v)),
             ExprNode::Array { elements, .. } => elements.iter().any(walk),
@@ -549,13 +561,11 @@ fn collect_ivar_types(methods: &[MethodDef]) -> Vec<(String, Ty)> {
     // by writes get widened by re-observation and break framework
     // runtime emit (e.g. `Base.flash` typed Option<Flash> mistakenly).
     let mut order: Vec<String> = Vec::new();
-    let mut observed: std::collections::HashMap<String, Vec<Ty>> =
-        std::collections::HashMap::new();
+    let mut observed: std::collections::HashMap<String, Vec<Ty>> = std::collections::HashMap::new();
     for m in methods {
         walk_collect_ivars(&m.body, &mut order, &mut observed);
     }
-    let written: std::collections::HashSet<String> =
-        observed.keys().cloned().collect();
+    let written: std::collections::HashSet<String> = observed.keys().cloned().collect();
     for m in methods {
         walk_collect_ivar_reads(&m.body, &written, &mut order, &mut observed);
     }
@@ -588,9 +598,7 @@ fn unify_ivar_tys(tys: &[Ty]) -> Ty {
             // `Union{[T, Nil]}` at every write site, and observing a
             // bare `Nil` alongside it (the initialize seed) must not
             // wrap it again into `Option<Option<T>>`.
-            Some(t @ Ty::Union { .. })
-                if matches!(&t, Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil))) =>
-            {
+            Some(t @ Ty::Union { .. }) if matches!(&t, Ty::Union { variants } if variants.iter().any(|v| matches!(v, Ty::Nil))) => {
                 t
             }
             Some(t) => Ty::Union {
@@ -653,7 +661,10 @@ fn walk_collect_ivars(
         observed.entry(k).or_default().push(ty);
     }
     match &*e.node {
-        ExprNode::Assign { target: LValue::Ivar { name }, value } => {
+        ExprNode::Assign {
+            target: LValue::Ivar { name },
+            value,
+        } => {
             let ty = value.ty.clone().unwrap_or(Ty::Untyped);
             record(name.as_str(), ty, order, observed);
             walk_collect_ivars(value, order, observed);
@@ -680,9 +691,12 @@ fn walk_collect_ivars(
         // `@flash` is the typed `Flash` struct, not a HashMap) would
         // be misread as a Hash assignment and widen the ivar type
         // away from the concrete struct.
-        ExprNode::Send { recv: Some(recv), method, args, .. }
-            if method.as_str() == "<<" && args.len() == 1 =>
-        {
+        ExprNode::Send {
+            recv: Some(recv),
+            method,
+            args,
+            ..
+        } if method.as_str() == "<<" && args.len() == 1 => {
             if let ExprNode::Ivar { name } = &*recv.node {
                 let elem = args[0].ty.clone().unwrap_or(Ty::Untyped);
                 record(
@@ -695,11 +709,15 @@ fn walk_collect_ivars(
                 );
             }
             walk_collect_ivars(recv, order, observed);
-            args.iter().for_each(|a| walk_collect_ivars(a, order, observed));
+            args.iter()
+                .for_each(|a| walk_collect_ivars(a, order, observed));
         }
-        ExprNode::Send { recv: Some(recv), method, args, .. }
-            if method.as_str() == "[]=" && args.len() == 2 =>
-        {
+        ExprNode::Send {
+            recv: Some(recv),
+            method,
+            args,
+            ..
+        } if method.as_str() == "[]=" && args.len() == 2 => {
             if let ExprNode::Ivar { name } = &*recv.node {
                 let key = name.as_str();
                 let already_hash = observed
@@ -721,20 +739,32 @@ fn walk_collect_ivars(
                 }
             }
             walk_collect_ivars(recv, order, observed);
-            args.iter().for_each(|a| walk_collect_ivars(a, order, observed));
+            args.iter()
+                .for_each(|a| walk_collect_ivars(a, order, observed));
         }
-        ExprNode::Seq { exprs } => {
-            exprs.iter().for_each(|e| walk_collect_ivars(e, order, observed))
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
+        ExprNode::Seq { exprs } => exprs
+            .iter()
+            .for_each(|e| walk_collect_ivars(e, order, observed)),
+        ExprNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             walk_collect_ivars(cond, order, observed);
             walk_collect_ivars(then_branch, order, observed);
             walk_collect_ivars(else_branch, order, observed);
         }
-        ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv { walk_collect_ivars(r, order, observed); }
-            args.iter().for_each(|a| walk_collect_ivars(a, order, observed));
-            if let Some(b) = block { walk_collect_ivars(b, order, observed); }
+        ExprNode::Send {
+            recv, args, block, ..
+        } => {
+            if let Some(r) = recv {
+                walk_collect_ivars(r, order, observed);
+            }
+            args.iter()
+                .for_each(|a| walk_collect_ivars(a, order, observed));
+            if let Some(b) = block {
+                walk_collect_ivars(b, order, observed);
+            }
         }
         ExprNode::While { cond, body, .. } => {
             walk_collect_ivars(cond, order, observed);
@@ -779,7 +809,10 @@ fn walk_collect_ivar_reads(
                 }
             }
         }
-        ExprNode::Assign { target: LValue::Ivar { .. }, value } => {
+        ExprNode::Assign {
+            target: LValue::Ivar { .. },
+            value,
+        } => {
             walk_collect_ivar_reads(value, written, order, observed);
         }
         ExprNode::Assign {
@@ -788,18 +821,29 @@ fn walk_collect_ivar_reads(
         } if matches!(&*recv.node, ExprNode::SelfRef) => {
             walk_collect_ivar_reads(value, written, order, observed);
         }
-        ExprNode::Seq { exprs } => {
-            exprs.iter().for_each(|e| walk_collect_ivar_reads(e, written, order, observed))
-        }
-        ExprNode::If { cond, then_branch, else_branch } => {
+        ExprNode::Seq { exprs } => exprs
+            .iter()
+            .for_each(|e| walk_collect_ivar_reads(e, written, order, observed)),
+        ExprNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             walk_collect_ivar_reads(cond, written, order, observed);
             walk_collect_ivar_reads(then_branch, written, order, observed);
             walk_collect_ivar_reads(else_branch, written, order, observed);
         }
-        ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv { walk_collect_ivar_reads(r, written, order, observed); }
-            args.iter().for_each(|a| walk_collect_ivar_reads(a, written, order, observed));
-            if let Some(b) = block { walk_collect_ivar_reads(b, written, order, observed); }
+        ExprNode::Send {
+            recv, args, block, ..
+        } => {
+            if let Some(r) = recv {
+                walk_collect_ivar_reads(r, written, order, observed);
+            }
+            args.iter()
+                .for_each(|a| walk_collect_ivar_reads(a, written, order, observed));
+            if let Some(b) = block {
+                walk_collect_ivar_reads(b, written, order, observed);
+            }
         }
         ExprNode::While { cond, body, .. } => {
             walk_collect_ivar_reads(cond, written, order, observed);
@@ -820,24 +864,36 @@ fn walk_collect_ivar_reads(
 /// doesn't pre-declare them and constants are emitted before classes.
 pub fn format_constant(name: &str, value: &Expr) -> String {
     match &*value.node {
-        ExprNode::Lit { value: Literal::Int { value: v } } => {
+        ExprNode::Lit {
+            value: Literal::Int { value: v },
+        } => {
             format!("pub const {name}: i64 = {v}_i64;")
         }
-        ExprNode::Lit { value: Literal::Float { value: v } } => {
+        ExprNode::Lit {
+            value: Literal::Float { value: v },
+        } => {
             let s = v.to_string();
             let lit = if s.contains('.') { s } else { format!("{s}.0") };
             format!("pub const {name}: f64 = {lit};")
         }
-        ExprNode::Lit { value: Literal::Bool { value: v } } => {
+        ExprNode::Lit {
+            value: Literal::Bool { value: v },
+        } => {
             format!("pub const {name}: bool = {v};")
         }
-        ExprNode::Lit { value: Literal::Str { value: v } } => {
+        ExprNode::Lit {
+            value: Literal::Str { value: v },
+        } => {
             format!("pub const {name}: &str = {v:?};")
         }
-        ExprNode::Lit { value: Literal::Sym { value: v } } => {
+        ExprNode::Lit {
+            value: Literal::Sym { value: v },
+        } => {
             format!("pub const {name}: &str = {:?};", v.as_str())
         }
-        ExprNode::Lit { value: Literal::Regex { pattern, .. } } => {
+        ExprNode::Lit {
+            value: Literal::Regex { pattern, .. },
+        } => {
             // Use a raw string for the pattern so backslashes don't
             // need re-escaping. Ruby's regex syntax differs from
             // Rust's regex crate in some edge cases (lookbehind,
@@ -894,20 +950,33 @@ fn format_array_constant(name: &str, elements: &[Expr]) -> String {
 /// shapes fall back to the value-type rule (untested but mechanical).
 fn rust_ty_for_constant_key(e: &Expr) -> String {
     match &*e.node {
-        ExprNode::Lit { value: Literal::Sym { .. } } | ExprNode::Lit { value: Literal::Str { .. } } => {
-            "&'static str".to_string()
+        ExprNode::Lit {
+            value: Literal::Sym { .. },
         }
+        | ExprNode::Lit {
+            value: Literal::Str { .. },
+        } => "&'static str".to_string(),
         _ => rust_ty_for_constant(e),
     }
 }
 
 fn rust_ty_for_constant(e: &Expr) -> String {
     match &*e.node {
-        ExprNode::Lit { value: Literal::Int { .. } } => "i64".to_string(),
-        ExprNode::Lit { value: Literal::Float { .. } } => "f64".to_string(),
-        ExprNode::Lit { value: Literal::Bool { .. } } => "bool".to_string(),
-        ExprNode::Lit { value: Literal::Str { .. } } => "&'static str".to_string(),
-        ExprNode::Lit { value: Literal::Sym { .. } } => "&'static str".to_string(),
+        ExprNode::Lit {
+            value: Literal::Int { .. },
+        } => "i64".to_string(),
+        ExprNode::Lit {
+            value: Literal::Float { .. },
+        } => "f64".to_string(),
+        ExprNode::Lit {
+            value: Literal::Bool { .. },
+        } => "bool".to_string(),
+        ExprNode::Lit {
+            value: Literal::Str { .. },
+        } => "&'static str".to_string(),
+        ExprNode::Lit {
+            value: Literal::Sym { .. },
+        } => "&'static str".to_string(),
         _ => "&'static str".to_string(),
     }
 }
@@ -917,22 +986,36 @@ fn rust_ty_for_constant(e: &Expr) -> String {
 /// `Symbol#to_s`); string keys quote with `{:?}`-style escaping.
 fn render_constant_key(e: &Expr) -> String {
     match &*e.node {
-        ExprNode::Lit { value: Literal::Sym { value } } => format!("{:?}", value.as_str()),
-        ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}"),
+        ExprNode::Lit {
+            value: Literal::Sym { value },
+        } => format!("{:?}", value.as_str()),
+        ExprNode::Lit {
+            value: Literal::Str { value },
+        } => format!("{value:?}"),
         _ => render_constant_value(e),
     }
 }
 
 fn render_constant_value(e: &Expr) -> String {
     match &*e.node {
-        ExprNode::Lit { value: Literal::Int { value } } => format!("{value}_i64"),
-        ExprNode::Lit { value: Literal::Float { value } } => {
+        ExprNode::Lit {
+            value: Literal::Int { value },
+        } => format!("{value}_i64"),
+        ExprNode::Lit {
+            value: Literal::Float { value },
+        } => {
             let s = value.to_string();
             if s.contains('.') { s } else { format!("{s}.0") }
         }
-        ExprNode::Lit { value: Literal::Bool { value } } => value.to_string(),
-        ExprNode::Lit { value: Literal::Str { value } } => format!("{value:?}"),
-        ExprNode::Lit { value: Literal::Sym { value } } => format!("{:?}", value.as_str()),
+        ExprNode::Lit {
+            value: Literal::Bool { value },
+        } => value.to_string(),
+        ExprNode::Lit {
+            value: Literal::Str { value },
+        } => format!("{value:?}"),
+        ExprNode::Lit {
+            value: Literal::Sym { value },
+        } => format!("{:?}", value.as_str()),
         _ => format!("/* TODO rust2 const value: {:?} */", e.node),
     }
 }
@@ -942,10 +1025,14 @@ mod op_assign_tests {
     use super::emit_library_class;
 
     fn emit(ruby: &str, rbs: &str) -> String {
-        let classes = crate::runtime_src::parse_library_with_rbs(ruby.as_bytes(), rbs, "op_assign.rb")
-            .expect("snippet parses and types");
+        let classes =
+            crate::runtime_src::parse_library_with_rbs(ruby.as_bytes(), rbs, "op_assign.rb")
+                .expect("snippet parses and types");
         crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
-            classes.iter().map(|c| emit_library_class(c).expect("emits")).collect()
+            classes
+                .iter()
+                .map(|c| emit_library_class(c).expect("emits"))
+                .collect()
         })
     }
 
@@ -959,10 +1046,16 @@ mod op_assign_tests {
             "module OpAssign\n  def self.count: (Integer n) -> String\nend\n",
         );
         assert!(!out.contains("TODO rust2"), "OpAssign fell through:\n{out}");
-        assert!(out.contains("i = i + 1_i64"), "int counter not advanced:\n{out}");
+        assert!(
+            out.contains("i = i + 1_i64"),
+            "int counter not advanced:\n{out}"
+        );
         // A `+=` is a reassignment, so its local needs `let mut` as the
         // spelled-out `s = s + "x"` gets.
-        assert!(out.contains("let mut s"), "`+=` local not declared mut:\n{out}");
+        assert!(
+            out.contains("let mut s"),
+            "`+=` local not declared mut:\n{out}"
+        );
     }
 }
 
@@ -971,10 +1064,14 @@ mod value_union_emit_tests {
     use super::emit_library_class;
 
     fn emit(ruby: &str, rbs: &str) -> String {
-        let classes = crate::runtime_src::parse_library_with_rbs(ruby.as_bytes(), rbs, "value_union.rb")
-            .expect("snippet parses and types");
+        let classes =
+            crate::runtime_src::parse_library_with_rbs(ruby.as_bytes(), rbs, "value_union.rb")
+                .expect("snippet parses and types");
         crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
-            classes.iter().map(|c| emit_library_class(c).expect("emits")).collect()
+            classes
+                .iter()
+                .map(|c| emit_library_class(c).expect("emits"))
+                .collect()
         })
     }
 
@@ -1062,7 +1159,9 @@ end
 
     fn method_body<'a>(src: &'a str, name: &str) -> &'a str {
         let needle = format!("pub fn {name}(");
-        let start = src.find(&needle).unwrap_or_else(|| panic!("missing {name}:\n{src}"));
+        let start = src
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing {name}:\n{src}"));
         let rest = &src[start..];
         let next = rest[needle.len()..]
             .find("\n    pub fn ")
@@ -1108,7 +1207,9 @@ end
         let pred = method_body(&src, "verified_request_pred");
         assert!(
             pred.contains("csrf_token_valid_pred")
-                && (pred.contains("&(") || pred.contains("&self.csrf_session_secret") || pred.contains("&csrf_session_secret")),
+                && (pred.contains("&(")
+                    || pred.contains("&self.csrf_session_secret")
+                    || pred.contains("&csrf_session_secret")),
             "csrf_token_valid? String args must borrow as &str:\n{pred}"
         );
         assert!(
@@ -1172,12 +1273,13 @@ end
 "#;
         let classes = crate::runtime_src::parse_library_with_rbs(ruby.as_bytes(), rbs, "vh.rb")
             .expect("snippet parses and types");
-        let out = crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
-            classes
-                .iter()
-                .map(|c| emit_library_class(c).expect("emits"))
-                .collect::<String>()
-        });
+        let out =
+            crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+                classes
+                    .iter()
+                    .map(|c| emit_library_class(c).expect("emits"))
+                    .collect::<String>()
+            });
         let body = method_body(&out, "call");
         assert!(
             body.contains("serde_json::Value::from") && body.contains("articles"),
@@ -1224,6 +1326,45 @@ end
         assert!(
             csrf.contains("serde_json::Value::Null"),
             "untyped nil tail is Value::Null:\n{csrf}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod keyword_field_emit_tests {
+    use super::emit_library_class;
+
+    #[test]
+    fn rust_keywords_are_escaped_consistently_for_instance_fields() {
+        let classes = crate::runtime_src::parse_library_with_rbs(
+            b"class KeywordField\n  def initialize\n    @type = \"text\"\n  end\n  def type\n    @type\n  end\nend\n",
+            "class KeywordField\n  def initialize: () -> void\n  def type: () -> String\nend\n",
+            "keyword_field.rb",
+        )
+        .expect("snippet parses and types");
+        let out =
+            crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+                classes
+                    .iter()
+                    .map(|class| emit_library_class(class).expect("emits"))
+                    .collect::<String>()
+            });
+
+        assert!(
+            out.contains("pub r#type: String"),
+            "field not escaped:\n{out}"
+        );
+        assert!(
+            out.contains("let mut r#type"),
+            "constructor local not escaped:\n{out}"
+        );
+        assert!(
+            out.contains("self.r#type"),
+            "field read not escaped:\n{out}"
+        );
+        assert!(
+            out.contains("Self { r#type }"),
+            "struct literal not escaped:\n{out}"
         );
     }
 }

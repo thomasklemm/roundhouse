@@ -22,7 +22,7 @@ use std::process::Command;
 
 use roundhouse::analyze::Analyzer;
 use roundhouse::emit::rust;
-use roundhouse::ingest::ingest_app;
+use roundhouse::ingest::{ingest_app, ingest_app_from_tree};
 
 fn scratch_dir(fixture: &str) -> PathBuf {
     std::env::temp_dir().join(format!("roundhouse-rust-check-{fixture}"))
@@ -77,6 +77,39 @@ fn real_blog_controller_identity_methods_emit_as_instance_methods() {
                 "{class_name} should emit instance method `{signature}`:\n{source}"
             );
         }
+    }
+}
+
+#[test]
+fn inherited_before_action_calls_dispatch_on_self() {
+    let files = [
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  before_action :require_authentication\n  before_action :deny_bots\n  before_action :allow_browser\n\n  private\n\n  def require_authentication\n  end\n\n  def deny_bots\n  end\n\n  def allow_browser\n  end\nend\n",
+        ),
+        (
+            "app/controllers/widgets_controller.rb",
+            "class WidgetsController < ApplicationController\n  def index\n  end\nend\n",
+        ),
+    ];
+    let tree = files
+        .into_iter()
+        .map(|(path, source)| (PathBuf::from(path), source.as_bytes().to_vec()))
+        .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    Analyzer::new(&app).analyze(&mut app);
+    let source = rust::emit(&app)
+        .into_iter()
+        .find(|file| file.path.ends_with("widgets_controller.rs"))
+        .expect("WidgetsController Rust output")
+        .content;
+
+    for method in ["require_authentication", "deny_bots", "allow_browser"] {
+        let call = format!("self.{method}()");
+        assert!(
+            source.contains(&call),
+            "inherited filter must self-dispatch as `{call}`:\n{source}"
+        );
     }
 }
 

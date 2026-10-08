@@ -13,10 +13,10 @@ mod send;
 pub(crate) mod util;
 use assign::emit_assign;
 use control::{emit_bool_op, emit_case, emit_if, emit_return, emit_seq, emit_while};
-use literal::{attach_block, emit_array, emit_closure, emit_hash, emit_string_interp};
 pub(super) use literal::emit_literal;
-use send::{cast_via_value_for_union, coerce_arg_for_field_ty, emit_send};
+use literal::{attach_block, emit_array, emit_closure, emit_hash, emit_string_interp};
 pub(super) use send::coerce_arg_for_param_ty;
+use send::{cast_via_value_for_union, coerce_arg_for_field_ty, emit_send};
 pub(super) use util::sanitize_ident;
 use util::{indent, is_copy_ty, is_option_of, peel_nil, value_narrowing_coercion};
 
@@ -35,7 +35,10 @@ thread_local! {
         std::cell::RefCell::new(None);
 }
 
-pub(super) fn with_param_types<F, R>(types: std::collections::HashMap<String, crate::ty::Ty>, f: F) -> R
+pub(super) fn with_param_types<F, R>(
+    types: std::collections::HashMap<String, crate::ty::Ty>,
+    f: F,
+) -> R
 where
     F: FnOnce() -> R,
 {
@@ -67,7 +70,9 @@ pub(super) fn local_var_ty(name: &str) -> Option<crate::ty::Ty> {
 
 pub(super) fn mark_local_var_ty(name: &str, ty: crate::ty::Ty) {
     let ctx = current_emit_ctx().expect("mark_local_var_ty called outside with_emit_ctx");
-    ctx.local_var_types.borrow_mut().insert(name.to_string(), ty);
+    ctx.local_var_types
+        .borrow_mut()
+        .insert(name.to_string(), ty);
 }
 
 /// Lookup a Var's declared type. Returns the function param's declared
@@ -100,7 +105,10 @@ pub(super) fn narrowed_param_read(
     let narrowed = narrowed_ty?;
     let declared = var_decl_ty(name)?;
     if is_option_of(&declared, narrowed) && !is_rebound_var(name) {
-        return Some(format!("{}.clone().unwrap()", util::escape_rust_keyword(name)));
+        return Some(format!(
+            "{}.clone().unwrap()",
+            util::escape_rust_keyword(name)
+        ));
     }
     if matches!(declared, crate::ty::Ty::Untyped) {
         if let Some(coerce) = value_narrowing_coercion(narrowed) {
@@ -157,7 +165,12 @@ pub(super) fn current_return_is_option() -> bool {
 /// produce an E0308 in a void function context).
 pub(super) fn current_return_is_unit() -> bool {
     current_emit_ctx()
-        .map(|ctx| matches!(ctx.current_return_ty.borrow().as_ref(), Some(crate::ty::Ty::Nil)))
+        .map(|ctx| {
+            matches!(
+                ctx.current_return_ty.borrow().as_ref(),
+                Some(crate::ty::Ty::Nil)
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -205,7 +218,9 @@ pub(super) fn module_singleton_hash_get(recv: &Expr, key_s: &str) -> Option<Stri
     if !in_module_singleton() || !module_singleton_thread_local() {
         return None;
     }
-    let ExprNode::Ivar { name } = &*recv.node else { return None };
+    let ExprNode::Ivar { name } = &*recv.node else {
+        return None;
+    };
     let slot = module_singleton_slot_name(name.as_str());
     Some(format!(
         "{slot}.with(|__s| __s.borrow().as_ref().and_then(|__m| __m.get({key_s}).cloned()))"
@@ -235,7 +250,10 @@ pub(super) fn ivar_field_ty(name: &str) -> Option<crate::ty::Ty> {
 /// `library.rs` to scope each `impl` block's emit. Swaps
 /// `EmitCtx::ivar_types` with save-restore (Phase 2 of #24).
 /// Must be called inside `with_emit_ctx` — panics otherwise.
-pub(super) fn with_ivar_types<F, R>(types: std::collections::HashMap<String, crate::ty::Ty>, f: F) -> R
+pub(super) fn with_ivar_types<F, R>(
+    types: std::collections::HashMap<String, crate::ty::Ty>,
+    f: F,
+) -> R
 where
     F: FnOnce() -> R,
 {
@@ -267,8 +285,7 @@ pub(super) fn with_method_scope<F, R>(body: &Expr, f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let mut counts: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     collect_var_assign_counts(body, &mut counts);
     let mut mut_vars: std::collections::HashSet<String> = counts
         .into_iter()
@@ -340,12 +357,11 @@ pub(super) fn wrap_if_needs_parens(e: &Expr, emitted: String) -> String {
     }
 }
 
-fn collect_var_send_receivers(
-    e: &Expr,
-    out: &mut std::collections::HashSet<String>,
-) {
+fn collect_var_send_receivers(e: &Expr, out: &mut std::collections::HashSet<String>) {
     match &*e.node {
-        ExprNode::Send { recv, args, block, .. } => {
+        ExprNode::Send {
+            recv, args, block, ..
+        } => {
             if let Some(r) = recv {
                 if let ExprNode::Var { name, .. } = &*r.node {
                     out.insert(name.as_str().to_string());
@@ -353,7 +369,9 @@ fn collect_var_send_receivers(
                 collect_var_send_receivers(r, out);
             }
             args.iter().for_each(|a| collect_var_send_receivers(a, out));
-            if let Some(b) = block { collect_var_send_receivers(b, out); }
+            if let Some(b) = block {
+                collect_var_send_receivers(b, out);
+            }
         }
         ExprNode::Assign { target, value } => {
             if let LValue::Attr { recv, .. } | LValue::Index { recv, .. } = target {
@@ -361,8 +379,14 @@ fn collect_var_send_receivers(
             }
             collect_var_send_receivers(value, out);
         }
-        ExprNode::Seq { exprs } => exprs.iter().for_each(|e| collect_var_send_receivers(e, out)),
-        ExprNode::If { cond, then_branch, else_branch } => {
+        ExprNode::Seq { exprs } => exprs
+            .iter()
+            .for_each(|e| collect_var_send_receivers(e, out)),
+        ExprNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             collect_var_send_receivers(cond, out);
             collect_var_send_receivers(then_branch, out);
             collect_var_send_receivers(else_branch, out);
@@ -376,9 +400,9 @@ fn collect_var_send_receivers(
             collect_var_send_receivers(k, out);
             collect_var_send_receivers(v, out);
         }),
-        ExprNode::Array { elements, .. } => {
-            elements.iter().for_each(|e| collect_var_send_receivers(e, out))
-        }
+        ExprNode::Array { elements, .. } => elements
+            .iter()
+            .for_each(|e| collect_var_send_receivers(e, out)),
         ExprNode::StringInterp { parts } => parts.iter().for_each(|p| {
             if let InterpPart::Expr { expr } = p {
                 collect_var_send_receivers(expr, out);
@@ -393,12 +417,12 @@ fn collect_var_send_receivers(
     }
 }
 
-fn collect_var_assign_counts(
-    e: &Expr,
-    out: &mut std::collections::HashMap<String, usize>,
-) {
+fn collect_var_assign_counts(e: &Expr, out: &mut std::collections::HashMap<String, usize>) {
     match &*e.node {
-        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+        ExprNode::Assign {
+            target: LValue::Var { name, .. },
+            value,
+        } => {
             *out.entry(name.as_str().to_string()).or_insert(0) += 1;
             collect_var_assign_counts(value, out);
         }
@@ -410,7 +434,11 @@ fn collect_var_assign_counts(
         }
         // `x += v` reassigns `x` (it desugars to `x = x + v`), so it
         // counts toward `let mut` exactly as the spelled-out form does.
-        ExprNode::OpAssign { target: LValue::Var { name, .. }, value, .. } => {
+        ExprNode::OpAssign {
+            target: LValue::Var { name, .. },
+            value,
+            ..
+        } => {
             *out.entry(name.as_str().to_string()).or_insert(0) += 1;
             collect_var_assign_counts(value, out);
         }
@@ -421,7 +449,11 @@ fn collect_var_assign_counts(
             collect_var_assign_counts(value, out);
         }
         ExprNode::Seq { exprs } => exprs.iter().for_each(|e| collect_var_assign_counts(e, out)),
-        ExprNode::If { cond, then_branch, else_branch } => {
+        ExprNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             collect_var_assign_counts(cond, out);
             collect_var_assign_counts(then_branch, out);
             collect_var_assign_counts(else_branch, out);
@@ -430,21 +462,25 @@ fn collect_var_assign_counts(
             collect_var_assign_counts(cond, out);
             collect_var_assign_counts(body, out);
         }
-        ExprNode::Send { recv, args, block, .. } => {
-            if let Some(r) = recv { collect_var_assign_counts(r, out); }
+        ExprNode::Send {
+            recv, args, block, ..
+        } => {
+            if let Some(r) = recv {
+                collect_var_assign_counts(r, out);
+            }
             args.iter().for_each(|a| collect_var_assign_counts(a, out));
-            if let Some(b) = block { collect_var_assign_counts(b, out); }
+            if let Some(b) = block {
+                collect_var_assign_counts(b, out);
+            }
         }
         ExprNode::Return { value } => collect_var_assign_counts(value, out),
-        ExprNode::Hash { entries, .. } => entries
+        ExprNode::Hash { entries, .. } => entries.iter().for_each(|(k, v)| {
+            collect_var_assign_counts(k, out);
+            collect_var_assign_counts(v, out);
+        }),
+        ExprNode::Array { elements, .. } => elements
             .iter()
-            .for_each(|(k, v)| {
-                collect_var_assign_counts(k, out);
-                collect_var_assign_counts(v, out);
-            }),
-        ExprNode::Array { elements, .. } => {
-            elements.iter().for_each(|e| collect_var_assign_counts(e, out))
-        }
+            .for_each(|e| collect_var_assign_counts(e, out)),
         ExprNode::StringInterp { parts } => parts.iter().for_each(|p| {
             if let InterpPart::Expr { expr } = p {
                 collect_var_assign_counts(expr, out);
@@ -467,10 +503,7 @@ pub(super) fn render_self_literal() -> String {
 /// Run `f` with `methods` registered as the current class's static-
 /// method set. Used by `library.rs::emit_library_class` to scope the
 /// static-method dispatch decision to the impl block being rendered.
-pub(super) fn with_static_methods<F, R>(
-    methods: std::collections::HashSet<String>,
-    f: F,
-) -> R
+pub(super) fn with_static_methods<F, R>(methods: std::collections::HashSet<String>, f: F) -> R
 where
     F: FnOnce() -> R,
 {
@@ -519,8 +552,7 @@ pub(super) fn class_method_param_ty(method: &str, idx: usize) -> Option<crate::t
 /// initialize(attrs = {})` accepts zero-arg `Article.new`, but
 /// Rust requires the explicit `HashMap::new()` default.
 pub(super) fn current_class_method_param_tys(method: &str) -> Option<Vec<crate::ty::Ty>> {
-    current_emit_ctx()
-        .and_then(|ctx| ctx.class_method_param_tys.borrow().get(method).cloned())
+    current_emit_ctx().and_then(|ctx| ctx.class_method_param_tys.borrow().get(method).cloned())
 }
 
 /// Run `f` with the `EmitCtx` installed. Used by `rust.rs::emit`
@@ -662,7 +694,13 @@ pub(super) fn is_global_mutating_method(name: &str) -> bool {
 fn each_block_mutates_param(body: &Expr, param: &str) -> bool {
     fn walk(e: &Expr, param: &str) -> bool {
         match &*e.node {
-            ExprNode::Send { recv, method, args, block, .. } => {
+            ExprNode::Send {
+                recv,
+                method,
+                args,
+                block,
+                ..
+            } => {
                 if let Some(r) = recv {
                     if matches!(&*r.node, ExprNode::Var { name, .. } if name.as_str() == param)
                         && is_global_mutating_method(method.as_str())
@@ -677,24 +715,24 @@ fn each_block_mutates_param(body: &Expr, param: &str) -> bool {
                     || block.as_ref().map(|b| walk(b, param)).unwrap_or(false)
             }
             ExprNode::Seq { exprs } => exprs.iter().any(|x| walk(x, param)),
-            ExprNode::If { cond, then_branch, else_branch } => {
-                walk(cond, param) || walk(then_branch, param) || walk(else_branch, param)
-            }
+            ExprNode::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => walk(cond, param) || walk(then_branch, param) || walk(else_branch, param),
             ExprNode::Assign { value, .. } | ExprNode::OpAssign { value, .. } => walk(value, param),
             ExprNode::Lambda { body, .. } => walk(body, param),
             ExprNode::Let { value, body, .. } => walk(value, param) || walk(body, param),
             ExprNode::Return { value }
             | ExprNode::Raise { value }
             | ExprNode::Splat { value }
-            | ExprNode::KeywordSplat { value } => {
-                walk(value, param)
-            }
+            | ExprNode::KeywordSplat { value } => walk(value, param),
             ExprNode::BoolOp { left, right, .. } => walk(left, param) || walk(right, param),
             ExprNode::While { cond, body, .. } => walk(cond, param) || walk(body, param),
             ExprNode::Array { elements, .. } => elements.iter().any(|x| walk(x, param)),
-            ExprNode::Hash { entries, .. } => {
-                entries.iter().any(|(k, v)| walk(k, param) || walk(v, param))
-            }
+            ExprNode::Hash { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| walk(k, param) || walk(v, param)),
             _ => false,
         }
     }
@@ -784,17 +822,23 @@ fn apply_str_coercion(raw: String, e: &Expr) -> String {
 /// otherwise the literal site would double-coerce on top of the
 /// decide pass's wrap.
 pub(super) fn has_str_coercion(e: &Expr) -> bool {
-    e.decisions
-        & (super::decide::bits::STR_TO_OWNED | super::decide::bits::STR_BORROW)
-        != 0
+    e.decisions & (super::decide::bits::STR_TO_OWNED | super::decide::bits::STR_BORROW) != 0
 }
 
 /// Render a Rust expression node after shared complete-call primitive classification.
 fn emit_expr_inner(e: &Expr) -> String {
-    if let Some(s) = crate::emit::shared::utf8_chr::emit(e, crate::emit::shared::utf8_chr::Target::Rust, emit_expr) {
+    if let Some(s) = crate::emit::shared::utf8_chr::emit(
+        e,
+        crate::emit::shared::utf8_chr::Target::Rust,
+        emit_expr,
+    ) {
         return s;
     }
-    if let Some(s) = crate::emit::shared::string_bytes::emit(e, crate::emit::shared::string_bytes::Target::Rust, emit_expr) {
+    if let Some(s) = crate::emit::shared::string_bytes::emit(
+        e,
+        crate::emit::shared::string_bytes::Target::Rust,
+        emit_expr,
+    ) {
         return s;
     }
     match &*e.node {
@@ -829,10 +873,7 @@ fn emit_expr_inner(e: &Expr) -> String {
             // shape would otherwise trip. Restricted to primitive
             // narrowings (Str/Sym/Int/Bool/Float) — Hash/Array
             // narrowings keep their existing Cast-wrapped path.
-            if let (Some(narrowed), Some(declared)) = (
-                e.ty.as_ref(),
-                local_var_ty(n).as_ref(),
-            ) {
+            if let (Some(narrowed), Some(declared)) = (e.ty.as_ref(), local_var_ty(n).as_ref()) {
                 use crate::ty::Ty;
                 let declared_peeled = crate::emit::rust::expr::util::peel_nil(declared);
                 let declared_is_value = matches!(declared_peeled, Ty::Untyped | Ty::Record { .. })
@@ -885,30 +926,28 @@ fn emit_expr_inner(e: &Expr) -> String {
                     // RefCell instead of locking a process-wide mutex
                     // (which profiled as the dominant render-path
                     // serializer at c=64 — roundhouse#32).
-                    return format!(
-                        "{slot}.with(|__s| __s.borrow().clone()).unwrap_or_default()"
-                    );
+                    return format!("{slot}.with(|__s| __s.borrow().clone()).unwrap_or_default()");
                 }
-                return format!(
-                    "{slot}.lock().unwrap().clone().unwrap_or_default()"
-                );
+                return format!("{slot}.lock().unwrap().clone().unwrap_or_default()");
             }
             if in_constructor() {
-                name.as_str().to_string()
-            } else if in_return_tail()
-                && matches!(e.ty.as_ref(), Some(t) if !is_copy_ty(t))
-            {
+                util::escape_rust_keyword(name.as_str())
+            } else if in_return_tail() && matches!(e.ty.as_ref(), Some(t) if !is_copy_ty(t)) {
                 // Tail-position read of a non-Copy field would move
                 // out of `&self`. `attr_reader`-shaped getters are the
                 // canonical case (`def body; @body; end`); also kicks
                 // in for any tail-`@x` body.
-                format!("self.{name}.clone()")
+                format!("self.{}.clone()", util::escape_rust_keyword(name.as_str()))
             } else {
-                format!("self.{name}")
+                format!("self.{}", util::escape_rust_keyword(name.as_str()))
             }
         }
         ExprNode::SelfRef => {
-            if in_class_method() { "Self".to_string() } else { "self".to_string() }
+            if in_class_method() {
+                "Self".to_string()
+            } else {
+                "self".to_string()
+            }
         }
         ExprNode::Const { path } => {
             // Rust uses file-as-module — `ActiveSupport::HashWithIndifferentAccess`
@@ -921,8 +960,18 @@ fn emit_expr_inner(e: &Expr) -> String {
             path.last().map(|s| s.to_string()).unwrap_or_default()
         }
         ExprNode::StringInterp { parts } => emit_string_interp(parts),
-        ExprNode::If { cond, then_branch, else_branch } => emit_if(cond, then_branch, else_branch),
-        ExprNode::Send { recv, method, args, block, .. } => {
+        ExprNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => emit_if(cond, then_branch, else_branch),
+        ExprNode::Send {
+            recv,
+            method,
+            args,
+            block,
+            ..
+        } => {
             // `recv.each { ... }` on Hash / Vec — Ruby returns the
             // receiver after iterating; Rust has no `each` method on
             // these types. Emit as `.iter().for_each(...)` (Hash) /
@@ -939,17 +988,18 @@ fn emit_expr_inner(e: &Expr) -> String {
                 let r = recv.as_ref().unwrap();
                 let block_lambda: Option<(&[crate::ident::Symbol], &Expr)> =
                     block.as_ref().and_then(|b| match &*b.node {
-                        ExprNode::Lambda { params, body, .. } => {
-                            Some((params.as_slice(), body))
-                        }
+                        ExprNode::Lambda { params, body, .. } => Some((params.as_slice(), body)),
                         _ => None,
                     });
                 if let Some((params, body)) = block_lambda {
-                    if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. })) && params.len() == 2 {
+                    if matches!(r.ty.as_ref(), Some(crate::ty::Ty::Hash { .. }))
+                        && params.len() == 2
+                    {
                         let recv_s = emit_expr(r);
                         let k = params[0].as_str();
                         let v = params[1].as_str();
-                        let body_s = emit_expr(body);
+                        // Closure body is its own block — see `emit_closure`.
+                        let body_s = with_closure_vars_scope(body, || emit_expr(body));
                         let closure = if body_s.contains('\n') {
                             format!("|({k}, {v})| {{\n{}\n}}", indent(&body_s, 1))
                         } else {
@@ -1053,8 +1103,13 @@ fn emit_expr_inner(e: &Expr) -> String {
                         let recv_mutated = !was_option
                             && each_block_mutates_param(body, p)
                             && matches!(&*r.node, ExprNode::Var { name, .. } if is_mut_var(name.as_str()));
-                        let recv_s = if recv_mutated { emit_send_recv(r) } else { emit_expr(r) };
-                        let body_s = emit_expr(body);
+                        let recv_s = if recv_mutated {
+                            emit_send_recv(r)
+                        } else {
+                            emit_expr(r)
+                        };
+                        // Closure body is its own block — see `emit_closure`.
+                        let body_s = with_closure_vars_scope(body, || emit_expr(body));
                         let closure = if body_s.contains('\n') {
                             format!("|{p}| {{\n{};\n}}", indent(&body_s, 1))
                         } else {
@@ -1091,7 +1146,10 @@ fn emit_expr_inner(e: &Expr) -> String {
             // anyway.
             if method.as_str() == "map" && args.is_empty() && recv.is_some() {
                 let r = recv.as_ref().unwrap();
-                if matches!(r.ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Array { .. })) {
+                if matches!(
+                    r.ty.as_ref().map(peel_nil),
+                    Some(crate::ty::Ty::Array { .. })
+                ) {
                     let block_lambda: Option<(&[crate::ident::Symbol], &Expr)> =
                         block.as_ref().and_then(|b| match &*b.node {
                             ExprNode::Lambda { params, body, .. } => {
@@ -1103,7 +1161,8 @@ fn emit_expr_inner(e: &Expr) -> String {
                         if params.len() == 1 {
                             let recv_s = emit_expr(r);
                             let p = params[0].as_str();
-                            let body_s = emit_expr(body);
+                            // Closure body is its own block — see `emit_closure`.
+                            let body_s = with_closure_vars_scope(body, || emit_expr(body));
                             let closure = if body_s.contains('\n') {
                                 format!("|{p}| {{\n{}\n}}", indent(&body_s, 1))
                             } else {
@@ -1147,7 +1206,12 @@ fn emit_expr_inner(e: &Expr) -> String {
                 Some(b) => attach_block(&base, b),
             }
         }
-        ExprNode::Lambda { params, block_param: _, body, .. } => {
+        ExprNode::Lambda {
+            params,
+            block_param: _,
+            body,
+            ..
+        } => {
             // Standalone lambda (e.g. `-> { ... }` or `lambda { |x| x }`)
             // emits as a Rust closure literal. Block params are
             // re-emitted as bare names; type inference at the call
@@ -1174,10 +1238,18 @@ fn emit_expr_inner(e: &Expr) -> String {
             emit_expr(&crate::expr::desugar_op_assign(target, *op, value, e.span))
         }
         ExprNode::Return { value } => emit_return(value),
-        ExprNode::While { cond, body, until_form } => emit_while(cond, body, *until_form),
+        ExprNode::While {
+            cond,
+            body,
+            until_form,
+        } => emit_while(cond, body, *until_form),
         ExprNode::Hash { entries, .. } => emit_hash(entries),
         ExprNode::Array { elements, .. } => emit_array(elements),
-        ExprNode::Range { begin, end, exclusive } => {
+        ExprNode::Range {
+            begin,
+            end,
+            exclusive,
+        } => {
             // Ruby `..` is inclusive end; Rust `..=` is inclusive end.
             // Ruby `...` is exclusive end; Rust `..` is exclusive end.
             // Mapping swaps the operator-shape: Ruby inclusive uses
@@ -1200,7 +1272,9 @@ fn emit_expr_inner(e: &Expr) -> String {
             }
             format!("{b}{op}{e}")
         }
-        ExprNode::BoolOp { op, left, right, .. } => emit_bool_op(op, left, right),
+        ExprNode::BoolOp {
+            op, left, right, ..
+        } => emit_bool_op(op, left, right),
         // `case scrutinee; when Pat; body; …; end` → Rust `match`.
         // Used by the model lowerer's `synth_index_read` /
         // `synth_index_write` (get_index / set_index), which dispatch
@@ -1253,11 +1327,18 @@ fn emit_expr_inner(e: &Expr) -> String {
                 // `arr[i]` types as `T | nil`, as Ruby's does, but a
                 // typed Vec index renders as the element itself
                 // (`send/index.rs`: `v[(i) as usize]`), never an Option.
-                ExprNode::Send { recv: Some(r), method, args, .. }
-                    if method.as_str() == "[]"
-                        && args.len() == 1
-                        && matches!(r.ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Array { .. }))
-                        && matches!(args[0].ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Int)) =>
+                ExprNode::Send {
+                    recv: Some(r),
+                    method,
+                    args,
+                    ..
+                } if method.as_str() == "[]"
+                    && args.len() == 1
+                    && matches!(
+                        r.ty.as_ref().map(peel_nil),
+                        Some(crate::ty::Ty::Array { .. })
+                    )
+                    && matches!(args[0].ty.as_ref().map(peel_nil), Some(crate::ty::Ty::Int)) =>
                 {
                     false
                 }
@@ -1308,7 +1389,10 @@ fn emit_expr_inner(e: &Expr) -> String {
         }
         // Catch-all for IR shapes not yet implemented. Each new runtime
         // file in Phase 2 expands this until full coverage.
-        other => format!("/* TODO rust2: ExprNode::{:?} */", std::mem::discriminant(other)),
+        other => format!(
+            "/* TODO rust2: ExprNode::{:?} */",
+            std::mem::discriminant(other)
+        ),
     }
 }
 
@@ -1319,11 +1403,12 @@ fn emit_expr_inner(e: &Expr) -> String {
 /// whether to insert the value-coercion transform.
 pub(super) fn arg_hash_var_local_ty(arg: &Expr) -> Option<(crate::ty::Ty, crate::ty::Ty)> {
     let inner: &Expr = match &*arg.node {
-        ExprNode::Send { recv: Some(r), method, args, .. }
-            if method.as_str() == "clone" && args.is_empty() =>
-        {
-            r
-        }
+        ExprNode::Send {
+            recv: Some(r),
+            method,
+            args,
+            ..
+        } if method.as_str() == "clone" && args.is_empty() => r,
         _ => arg,
     };
     let name = match &*inner.node {
@@ -1340,7 +1425,9 @@ pub(super) fn arg_hash_var_local_ty(arg: &Expr) -> Option<(crate::ty::Ty, crate:
 /// (`empty_hash_return_ty` in assign.rs), return its (K, V) types.
 /// Gated on the back-propagation set so the Send `[]=` peephole only
 /// coerces args when the recorded type is authoritative.
-pub(super) fn recv_var_back_propagated_hash_kv(recv: &Expr) -> Option<(crate::ty::Ty, crate::ty::Ty)> {
+pub(super) fn recv_var_back_propagated_hash_kv(
+    recv: &Expr,
+) -> Option<(crate::ty::Ty, crate::ty::Ty)> {
     let name = match &*recv.node {
         ExprNode::Var { name, .. } => name.as_str().to_string(),
         _ => return None,
@@ -1365,4 +1452,30 @@ pub(super) fn with_declared_vars_scope<R>(f: impl FnOnce() -> R) -> R {
     let r = f();
     *ctx.declared_vars.borrow_mut() = snapshot;
     r
+}
+
+/// Emit a closure body with its own declaration and assignment scope.
+/// Names declared outside stay visible as captures, but assignments
+/// first encountered in the closure become local `let`s. Closure-local
+/// repeated assignments (and writes to captured bindings) also need
+/// `mut`, even though the method-level prepass deliberately doesn't
+/// treat closure bodies as ordinary method statements.
+pub(super) fn with_closure_vars_scope<R>(body: &Expr, f: impl FnOnce() -> R) -> R {
+    let ctx = current_emit_ctx().expect("with_closure_vars_scope called outside with_emit_ctx");
+    let declared_snapshot = ctx.declared_vars.borrow().clone();
+    let mut_snapshot = ctx.mut_vars.borrow().clone();
+    let mut counts = std::collections::HashMap::new();
+    collect_var_assign_counts(body, &mut counts);
+    for (name, count) in counts {
+        if count > 1 || declared_snapshot.contains(&name) {
+            ctx.mut_vars.borrow_mut().insert(name);
+        }
+    }
+    // Closures do not inherit their enclosing method's return type.
+    // Besides being a Rust type error for nested Option-returning
+    // branches, that context can wrap a block's final expression in
+    // `Some(...)` even though the closure's own return is inferred.
+    let result = with_current_return_ty(None, || with_declared_vars_scope(f));
+    *ctx.mut_vars.borrow_mut() = mut_snapshot;
+    result
 }

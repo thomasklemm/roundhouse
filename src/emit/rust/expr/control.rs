@@ -426,6 +426,9 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
     // An IR-carried guard-free Wildcard (a source `else`, or the shared
     // send grounding's raise arm) already IS the default — appending a
     // second `_` would be unreachable.
+    if let Some(rendered) = emit_regex_case(scrutinee, arms) {
+        return rendered;
+    }
     let scrutinee_s = emit_expr(scrutinee);
     let return_ty = current_return_ty();
     let return_is_value = matches!(return_ty.as_ref(), Some(crate::ty::Ty::Untyped));
@@ -461,6 +464,83 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
         "match {scrutinee_s} {{\n{}\n        _ => {default_arm},\n    }}",
         arm_strs.join(",\n"),
     )
+}
+
+/// Ruby `case value; when /pattern/; ...` invokes `Regexp#===` on the
+/// case value. Rust's `match` patterns cannot express that test, so
+/// compile the all-regex shape as an ordered `if` chain. This preserves
+/// the first-matching-arm behavior and handles the common Rails pattern
+/// of identifying the user-agent platform.
+fn emit_regex_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> Option<String> {
+    use crate::expr::{ExprNode, Literal, Pattern};
+
+    let regex_source = |pattern: &Pattern| match pattern {
+        Pattern::Expr { expr }
+            if matches!(&*expr.node, ExprNode::Lit { value: Literal::Regex { .. } }) =>
+        {
+            Some(emit_expr(expr))
+        }
+        Pattern::Lit { value } if matches!(value, Literal::Regex { .. }) => {
+            Some(super::literal::emit_literal(value))
+        }
+        _ => None,
+    };
+    if arms.is_empty()
+        || !arms
+            .iter()
+            .all(|arm| regex_source(&arm.pattern).is_some() || matches!(&arm.pattern, Pattern::Wildcard))
+    {
+        return None;
+    }
+
+    let recv = emit_expr(scrutinee);
+    let return_ty = current_return_ty();
+    let return_is_value = matches!(return_ty.as_ref(), Some(crate::ty::Ty::Untyped));
+    let mut branches = Vec::new();
+    let mut default = None;
+    for arm in arms {
+        let body = emit_expr_tail(&arm.body);
+        let body = if return_is_value && !arm_body_already_value(&arm.body) {
+            format!("serde_json::Value::from({body})")
+        } else {
+            body
+        };
+        if matches!(arm.pattern, Pattern::Wildcard) {
+            if arm.guard.is_some() || default.is_some() {
+                return None;
+            }
+            default = Some(body);
+            continue;
+        }
+
+        let pattern = regex_source(&arm.pattern)?;
+        let test = format!("({pattern}).is_match(&({recv}))");
+        let test = if let Some(guard) = &arm.guard {
+            format!("{test} && ({})", emit_expr(guard))
+        } else {
+            test
+        };
+        branches.push(format!("if {test} {{ {body} }}"));
+    }
+
+    let fallback = default.unwrap_or_else(|| {
+        if return_is_value {
+            "serde_json::Value::Null".to_string()
+        } else if current_return_is_option() {
+            "None".to_string()
+        } else {
+            "()".to_string()
+        }
+    });
+    let Some((last, preceding)) = branches.split_last() else {
+        return Some(fallback);
+    };
+    let mut chain = preceding
+        .iter()
+        .map(|branch| format!("{branch} else "))
+        .collect::<String>();
+    chain.push_str(last);
+    Some(format!("{chain} else {{ {fallback} }}"))
 }
 
 /// Detect a standalone Ruby guard-clause on a Var/param:
@@ -686,5 +766,40 @@ mod tests {
             bool_var("c"),
         );
         assert_eq!(emit(&and_in_and), "a && b && c");
+    }
+
+    #[test]
+    fn regex_case_uses_ordered_match_predicates() {
+        use crate::expr::{Arm, Literal, Pattern};
+
+        let mut scrutinee = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var { id: VarId(0), name: Symbol::from("platform") },
+        );
+        scrutinee.ty = Some(Ty::Str);
+        let regex_arm = Arm {
+            pattern: Pattern::Lit {
+                value: Literal::Regex { pattern: "Android".to_string(), flags: String::new() },
+            },
+            guard: None,
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Str { value: "Android".to_string() } },
+            ),
+        };
+        let fallback = Arm {
+            pattern: Pattern::Wildcard,
+            guard: None,
+            body: Expr::new(
+                Span::synthetic(),
+                ExprNode::Lit { value: Literal::Str { value: "Other".to_string() } },
+            ),
+        };
+        let emitted = with_emit_ctx(EmitCtx::default(), || {
+            emit_case(&scrutinee, &[regex_arm, fallback])
+        });
+        assert!(emitted.contains(".is_match(&(platform))"), "{emitted}");
+        assert!(emitted.contains("else { \"Other\" }"), "{emitted}");
+        assert!(!emitted.contains("match platform"), "{emitted}");
     }
 }
