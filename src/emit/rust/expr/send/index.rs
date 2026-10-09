@@ -930,7 +930,6 @@ mod tests {
     use crate::span::Span;
 
     #[test]
-    #[test]
     fn hash_value_nil_predicate_uses_null_but_option_nil_predicate_is_unchanged() {
         let mut map = Expr::new(
             Span::synthetic(),
@@ -986,7 +985,7 @@ mod tests {
         crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
             assert!(rust_emits_json_value_index(&lookup));
             assert_eq!(
-                try_recv_typed_method(Some(&lookup), "nil?", &[]).as_deref(),
+                try_recv_typed_method(Some(&lookup), "nil?", &[], None).as_deref(),
                 Some("attrs.get(\"body\").cloned().unwrap_or(serde_json::Value::Null).is_null()")
             );
             assert_eq!(
@@ -1016,7 +1015,7 @@ mod tests {
 
         crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
             assert_eq!(
-                try_recv_typed_method(Some(&helper_call), "nil?", &[]).as_deref(),
+                try_recv_typed_method(Some(&helper_call), "nil?", &[], None).as_deref(),
                 Some("{ let _ = ViewHelpers::dom_id(); false }")
             );
         });
@@ -1037,7 +1036,7 @@ mod tests {
 
         crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
             assert_eq!(
-                try_recv_typed_method(Some(&helper_call), "nil?", &[]).as_deref(),
+                try_recv_typed_method(Some(&helper_call), "nil?", &[], None).as_deref(),
                 Some("{ let _ = dom_id(); false }")
             );
         });

@@ -84,6 +84,12 @@ fn emitted_rust_router_packages_error_imports() {
     assert!(router.contains("use crate::errors_ext::raise;"), "{router}");
     assert!(router.contains("use crate::errors_ext::ArgumentError;"), "{router}");
     assert!(router.contains("pub fn capture_byte("), "{router}");
+    for binding in ["part", "byte"] {
+        assert!(
+            router.contains(&format!("let Some({binding}) =")),
+            "the checked array read must bind a nonnullable {binding}, not silently default it:\n{router}"
+        );
+    }
     assert!(
         router.contains("format!(\"{}{}\", name, \"\")"),
         "Hash iteration keys must be owned before capture_pairs returns Vec<String>:\n{router}"

@@ -666,6 +666,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     ..Default::default()
                 },
             );
+        let available = lcs.clone();
+        crate::lower::rust_inheritance::flatten_inherited_instance_methods(
+            &mut lcs,
+            &available,
+        );
         let registry = crate::emit::rust::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
@@ -2452,6 +2457,11 @@ fn emit_app_library_classes(
         } else {
             ""
         };
+        let hash_import = if body.contains("merge_attrs(") {
+            "use crate::hash_ext::merge_attrs;\n"
+        } else {
+            ""
+        };
         let identifiers = body
             .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .collect::<std::collections::HashSet<_>>();
@@ -2479,7 +2489,7 @@ fn emit_app_library_classes(
         files.push(EmittedFile {
             path: PathBuf::from(format!("src/app_classes/{class_path}.rs")),
             content: format!(
-                "#[allow(unused_imports)]\nuse crate::app_classes::*;\nuse crate::user_agent::*;\nuse crate::view_helpers::ViewHelpers;\n{route_helpers_import}{ruby_to_s_import}{string_io_import}{model_import}{body}"
+                "#[allow(unused_imports)]\nuse crate::app_classes::*;\nuse crate::user_agent::*;\nuse crate::view_helpers::ViewHelpers;\n{route_helpers_import}{ruby_to_s_import}{string_io_import}{hash_import}{model_import}{body}"
             ),
         });
         entries.push((class_path, name));

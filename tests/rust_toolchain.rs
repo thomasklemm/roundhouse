@@ -85,11 +85,11 @@ fn inherited_before_action_calls_dispatch_on_self() {
     let files = [
         (
             "app/controllers/application_controller.rb",
-            "class ApplicationController < ActionController::Base\n  before_action :require_authentication\n  before_action :deny_bots\n  before_action :allow_browser\n\n  private\n\n  def require_authentication\n  end\n\n  def deny_bots\n  end\n\n  def allow_browser\n  end\nend\n",
+            "class ApplicationController < ActionController::Base\n  before_action :require_authentication\n  before_action :deny_bots\n  before_action :allow_browser\n\n  private\n\n  def require_authentication\n    set_version_headers\n    other.foreign_helper\n  end\n\n  def set_version_headers\n  end\n\n  def deny_bots\n  end\n\n  def allow_browser\n  end\n\n  def foreign_helper\n  end\n\n  def unused_parent_helper\n  end\nend\n",
         ),
         (
             "app/controllers/widgets_controller.rb",
-            "class WidgetsController < ApplicationController\n  def index\n  end\nend\n",
+            "class WidgetsController < ApplicationController\n  def index\n    other.foreign_helper\n  end\n\n  private\n\n  def allow_browser\n    @child_allow_browser = \"child-allow-browser\"\n  end\nend\n",
         ),
     ];
     let tree = files
@@ -104,13 +104,49 @@ fn inherited_before_action_calls_dispatch_on_self() {
         .expect("WidgetsController Rust output")
         .content;
 
-    for method in ["require_authentication", "deny_bots", "allow_browser"] {
+    for method in ["require_authentication", "deny_bots", "set_version_headers"] {
         let call = format!("self.{method}()");
         assert!(
             source.contains(&call),
             "inherited filter must self-dispatch as `{call}`:\n{source}"
         );
+        let definition = format!("fn {method}(");
+        assert!(
+            source.contains(&definition),
+            "reachable inherited method `{method}` must be defined on the child:\n{source}"
+        );
     }
+    assert!(
+        source.contains("self.allow_browser()"),
+        "the inherited filter must still dispatch to the child override:\n{source}"
+    );
+    let allow_browser = source
+        .find("fn allow_browser(")
+        .map(|start| {
+            let body = &source[start..];
+            body.find("\n}")
+                .map(|end| &body[..end])
+                .unwrap_or(body)
+        })
+        .unwrap_or("");
+    assert!(
+        allow_browser.contains("child_allow_browser")
+            && allow_browser.contains("child-allow-browser"),
+        "the child override body must be the emitted definition:\n{source}"
+    );
+    assert!(
+        !source.contains("unused_parent_helper"),
+        "unreferenced ancestor methods must not be copied:\n{source}"
+    );
+    assert!(
+        source.contains("foreign_helper") && !source.contains("fn foreign_helper("),
+        "a same-named method called only on another object must stay a call, not a copy:\n{source}"
+    );
+    assert_eq!(
+        source.matches("fn allow_browser(").count(),
+        1,
+        "child override must replace the inherited definition, not duplicate it:\n{source}"
+    );
 }
 
 #[test]

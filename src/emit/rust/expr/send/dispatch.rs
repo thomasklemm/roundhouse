@@ -173,7 +173,7 @@ mod tests {
             );
             assert_eq!(
                 dispatch_method_by_recv_ty(&nilable_string, "nil?", &[]).as_deref(),
-                Some("false")
+                Some("title.is_none()")
             );
         });
     }

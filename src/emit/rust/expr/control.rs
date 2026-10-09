@@ -875,6 +875,25 @@ fn coerce_to_value_default(default_expr: &Expr, raw: String) -> String {
 /// assignment sequences whose overall type is less specific. Used by
 /// the `if` tail-position Some-wrap to avoid `Option<Option<T>>`.
 fn tail_produces_option(branch: &Expr) -> bool {
+    if let ExprNode::Seq { exprs } = &*branch.node {
+        if exprs.last().is_some_and(tail_produces_option) {
+            return true;
+        }
+    }
+    if let ExprNode::Send {
+        recv: Some(receiver),
+        method,
+        args,
+        ..
+    } = &*branch.node
+        && method.as_str() == "[]"
+        && args.len() == 1
+        && matches!(receiver.ty.as_ref().map(super::util::peel_nil), Some(crate::ty::Ty::Array { .. }))
+        && matches!(args[0].ty.as_ref(), Some(crate::ty::Ty::Int))
+        && branch.ty.as_ref().is_some_and(super::util::is_option_ty)
+    {
+        return true;
+    }
     if let ExprNode::Send {
         recv: Some(receiver),
         ..

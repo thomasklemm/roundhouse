@@ -55,13 +55,16 @@ pub fn flatten_inherited_initializers(targets: &mut [LibraryClass], available: &
 }
 
 /// Flatten only inherited methods reachable from the target's own
-/// receiverless calls, then qualify those calls with `self`. The Rust
-/// emitter has no superclass dispatch, and receiverless Sends otherwise
-/// become free-function calls. Dependencies are followed transitively;
-/// unrelated ancestor methods are not copied. Child definitions win;
-/// the nearest ancestor supplies any missing method. Methods whose
-/// bodies call `super` are left unflattened rather than emitting a false
-/// implementation.
+/// receiverless calls and explicit `self` sends, then qualify the
+/// receiverless calls with `self`. The Rust emitter has no superclass
+/// dispatch, and receiverless Sends otherwise become free-function
+/// calls. Synthesized dispatch (`process_action` filters and guards)
+/// already uses `self`, so those sends must seed the same walk.
+/// Dependencies are followed transitively through both shapes;
+/// unrelated ancestor methods, and sends on other receivers, are not
+/// copied. Child definitions win; the nearest ancestor supplies any
+/// missing method. Methods whose bodies call `super` are left
+/// unflattened rather than emitting a false implementation.
 pub fn flatten_inherited_instance_methods(
     targets: &mut [LibraryClass],
     available: &[LibraryClass],
@@ -103,7 +106,7 @@ pub fn flatten_inherited_instance_methods_for_consumers(
         let mut pending = Vec::new();
         for method in &target.methods {
             if method.receiver == MethodReceiver::Instance {
-                collect_implicit_calls(&method.body, &mut pending);
+                collect_reachable_instance_calls(&method.body, &mut pending);
             }
         }
         for consumer in consumers {
@@ -133,7 +136,7 @@ pub fn flatten_inherited_instance_methods_for_consumers(
             }
             let mut inherited = inherited.clone();
             inherited.enclosing_class = Some(target.name.0.clone());
-            collect_implicit_calls(&inherited.body, &mut pending);
+            collect_reachable_instance_calls(&inherited.body, &mut pending);
             target.methods.push(inherited);
         }
 
@@ -178,15 +181,21 @@ fn collect_explicit_calls_for_class(
     });
 }
 
-fn collect_implicit_calls(expr: &Expr, out: &mut Vec<crate::ident::Symbol>) {
-    if let ExprNode::Send {
-        recv: None, method, ..
-    } = &*expr.node
-    {
-        out.push(method.clone());
+/// Names this instance body may resolve on `self`: a receiverless send,
+/// or an explicit `SelfRef` send. Other receivers stay out — a call on
+/// another object is not a request to copy that method onto the target.
+fn collect_reachable_instance_calls(expr: &Expr, out: &mut Vec<crate::ident::Symbol>) {
+    if let ExprNode::Send { recv, method, .. } = &*expr.node {
+        let on_self = match recv {
+            None => true,
+            Some(recv) => matches!(&*recv.node, ExprNode::SelfRef),
+        };
+        if on_self {
+            out.push(method.clone());
+        }
     }
     expr.node
-        .for_each_child(&mut |child| collect_implicit_calls(child, out));
+        .for_each_child(&mut |child| collect_reachable_instance_calls(child, out));
 }
 
 fn qualify_implicit_instance_calls(
@@ -368,6 +377,135 @@ mod tests {
                 } if matches!(&*receiver.node, ExprNode::SelfRef)
             ));
         }
+    }
+
+    fn self_send(name: &str) -> Expr {
+        let span = Span::synthetic();
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(span, ExprNode::SelfRef)),
+                method: Symbol::from(name),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
+
+    fn other_send(name: &str) -> Expr {
+        let span = Span::synthetic();
+        Expr::new(
+            span,
+            ExprNode::Send {
+                recv: Some(Expr::new(
+                    span,
+                    ExprNode::Var {
+                        id: crate::ident::VarId(0),
+                        name: Symbol::from("other"),
+                    },
+                )),
+                method: Symbol::from(name),
+                args: Vec::new(),
+                block: None,
+                parenthesized: false,
+            },
+        )
+    }
+
+    #[test]
+    fn explicit_self_calls_flatten_reachable_ancestors_only() {
+        let span = Span::synthetic();
+        let far_stamp = Expr::new(
+            span,
+            ExprNode::Lit {
+                value: Literal::Str {
+                    value: "far-stamp".to_string(),
+                },
+            },
+        );
+        let near_stamp = Expr::new(
+            span,
+            ExprNode::Lit {
+                value: Literal::Str {
+                    value: "near-stamp".to_string(),
+                },
+            },
+        );
+        let grandparent = class(
+            "ActionController::Base",
+            None,
+            vec![
+                initializer(
+                    "set_version_headers",
+                    Expr::new(
+                        span,
+                        ExprNode::Seq {
+                            exprs: vec![self_send("stamp_version"), other_send("unrelated_other")],
+                        },
+                    ),
+                ),
+                initializer("stamp_version", far_stamp),
+            ],
+        );
+        let parent = class(
+            "ApplicationController",
+            Some("ActionController::Base"),
+            vec![
+                initializer("require_authentication", self_send("set_version_headers")),
+                initializer("deny_bots", self_send("stamp_version")),
+                initializer("uses_super", Expr::new(span, ExprNode::Super { args: None })),
+                initializer("stamp_version", near_stamp),
+                initializer("child_owned", self_send("must_not_copy")),
+                initializer("must_not_copy", self_send("set_version_headers")),
+                initializer("unrelated", self_send("stamp_version")),
+            ],
+        );
+        let mut targets = vec![class(
+            "WidgetsController",
+            Some("ApplicationController"),
+            vec![
+                initializer("process_action", self_send("require_authentication")),
+                initializer("process_action_tail", self_send("deny_bots")),
+                initializer("child_owned", Expr::new(span, ExprNode::Lit { value: Literal::Nil })),
+            ],
+        )];
+
+        flatten_inherited_instance_methods(&mut targets, &[grandparent, parent]);
+
+        let names: Vec<String> = targets[0]
+            .methods
+            .iter()
+            .map(|method| method.name.as_str().to_string())
+            .collect();
+        for name in [
+            "require_authentication",
+            "deny_bots",
+            "set_version_headers",
+            "stamp_version",
+        ] {
+            assert!(names.contains(&name.to_string()), "missing {name}: {names:?}");
+        }
+        let stamp = targets[0]
+            .methods
+            .iter()
+            .find(|method| method.name.as_str() == "stamp_version")
+            .expect("nearest stamp_version");
+        assert!(
+            matches!(
+                &*stamp.body.node,
+                ExprNode::Lit { value: Literal::Str { value } } if value == "near-stamp"
+            ),
+            "nearest ancestor must supply stamp_version"
+        );
+        for name in ["uses_super", "must_not_copy", "unrelated", "unrelated_other"] {
+            assert!(!names.contains(&name.to_string()), "copied {name}: {names:?}");
+        }
+        assert_eq!(
+            names.iter().filter(|name| name.as_str() == "child_owned").count(),
+            1,
+            "child definition must not be duplicated: {names:?}"
+        );
     }
 
     #[test]

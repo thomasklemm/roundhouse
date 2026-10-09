@@ -338,7 +338,9 @@ module ActionDispatch
     # Internal String-only pair access. The caller visits an even-length
     # snapshot two entries at a time, proving both nonnegative indexes exist.
     def self.capture_part(pairs, index)
-      pairs[index]
+      part = pairs[index]
+      raise ArgumentError, "Missing internal route capture part" if part.nil?
+      part
     end
 
     # Decode bytes before interpreting UTF-8: one character may mix raw and
@@ -443,7 +445,9 @@ module ActionDispatch
     def self.capture_byte(bytes, index)
       raise ArgumentError, "Invalid encoding for path parameter" if index < 0
       raise ArgumentError, "Invalid encoding for path parameter" if index >= bytes.length
-      bytes[index]
+      byte = bytes[index]
+      raise ArgumentError, "Invalid encoding for path parameter" if byte.nil?
+      byte
     end
 
     # ASCII hexadecimal classification without Unicode case folding.

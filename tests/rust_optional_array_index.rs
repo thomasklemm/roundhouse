@@ -17,6 +17,16 @@ fn optional_array_index_uses_a_checked_lookup() {
   def last_item
     ["first", "second"][-1]
   end
+
+  def last_or_nil
+    rows = ["first", "second"]
+    rows.length == 0 ? nil : rows[-1]
+  end
+
+  def missing_or_nil
+    rows = ["first", "second"]
+    rows.length == 0 ? nil : rows[8]
+  end
 end
 "#,
     )]
@@ -48,4 +58,20 @@ end
         source.contains("checked_sub(1_usize).and_then(|__index| __recv.get(__index)).cloned()"),
         "negative indexes must also preserve Ruby's nil-on-miss result:\n{source}"
     );
+    for method in ["last_or_nil", "missing_or_nil"] {
+        let body = source
+            .split(&format!("fn __rh_static_{method}("))
+            .nth(1)
+            .or_else(|| source.split(&format!("pub fn {method}(")).nth(1))
+            .expect("conditional index method")
+            .split("\n    pub fn ")
+            .next()
+            .unwrap();
+        assert!(body.contains("-> Option<String>"), "{body}");
+        assert!(body.contains(".get("), "{body}");
+        assert!(
+            !body.contains("Some("),
+            "the branch lookup already returns Option; wrapping it nests Option and breaks nil-on-miss:\n{body}"
+        );
+    }
 }
