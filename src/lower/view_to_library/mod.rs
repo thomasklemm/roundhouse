@@ -74,6 +74,20 @@ pub fn lower_views_to_library_classes(
     lcs
 }
 
+/// Lower views with controller `helper_method` values as explicit parameters.
+/// The legacy entry point remains unchanged for all other targets.
+pub fn lower_views_to_library_classes_with_controller_helpers(
+    views: &[View],
+    app: &App,
+    extras: Vec<(ClassId, crate::analyze::ClassInfo)>,
+    visible_helpers: &std::collections::BTreeSet<Symbol>,
+) -> Vec<LibraryClass> {
+    let vctx = ViewLowerCtx::new_with_controller_helpers(app, visible_helpers);
+    let mut lcs = preliminary_view_classes(views, &vctx);
+    type_view_library_classes(&mut lcs, app, extras);
+    lcs
+}
+
 /// Untyped view classes used only to seed model/controller registries
 /// with `Views::*` method signatures. Body typing happens later in
 /// [`type_view_library_classes`]. Callers that already built a
@@ -222,6 +236,9 @@ pub struct ViewLowerCtx<'a> {
     app: &'a App,
     known_models: Vec<String>,
     closures: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
+    controller_helpers: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
+    controller_helper_types: std::rc::Rc<std::collections::HashMap<Symbol, crate::ty::Ty>>,
+    visible_controller_helpers: std::rc::Rc<std::collections::BTreeSet<Symbol>>,
     dyn_pools: std::rc::Rc<std::collections::HashMap<(String, Symbol), Vec<DynPoolEntry>>>,
     /// Partials whose body renders a `file_field` — see
     /// `ViewCtx::multipart_partials`.
@@ -260,6 +277,13 @@ pub struct ViewLowerCtx<'a> {
 
 impl<'a> ViewLowerCtx<'a> {
     pub fn new(app: &'a App) -> Self {
+        Self::new_with_controller_helpers(app, &std::collections::BTreeSet::new())
+    }
+
+    pub(crate) fn new_with_controller_helpers(
+        app: &'a App,
+        visible_helpers: &std::collections::BTreeSet<Symbol>,
+    ) -> Self {
         // The GENERATED helpers, surveyed once for both the name set and
         // the arity map — read off the lowered functions rather than
         // re-derived from the route table, so the two can't drift.
@@ -287,6 +311,13 @@ impl<'a> ViewLowerCtx<'a> {
                 .map(|m| m.name.0.as_str().to_string())
                 .collect(),
             closures: std::rc::Rc::new(view_ivar_closures(&app.views, &app.controllers)),
+            controller_helpers: std::rc::Rc::new(controller_helper_closures(
+                &app.views, visible_helpers, &app.controllers,
+            )),
+            controller_helper_types: std::rc::Rc::new(controller_helper_types(
+                &app.views, visible_helpers,
+            )),
+            visible_controller_helpers: std::rc::Rc::new(visible_helpers.clone()),
             dyn_pools: std::rc::Rc::new(dynamic_partial_pools(&app.controllers)),
             multipart_partials: std::rc::Rc::new(multipart_partials(&app.views)),
             partial_extras: std::rc::Rc::new(partial_extras_map(app)),
@@ -482,6 +513,9 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         .iter()
         .map(|s| crate::naming::safe_local(s.as_str()))
         .collect();
+    let closure_helpers: Vec<Symbol> = view_key_of(view)
+        .and_then(|key| lx.controller_helpers.get(&key).cloned())
+        .unwrap_or_default();
 
     // A partial's locals are its interface: every `locals:` key any call
     // site passes becomes a trailing nil-default param (sorted; see
@@ -573,6 +607,15 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         }
     }
 
+    for helper in &closure_helpers {
+        let name = crate::naming::safe_local(helper.as_str());
+        if !typed.iter().any(|(existing, _)| existing == &name) {
+            let ty = lx.controller_helper_types.get(helper).cloned()
+                .unwrap_or(crate::ty::Ty::Untyped);
+            typed.push((name, ty));
+        }
+    }
+
     let mut params: Vec<Param> = Vec::new();
     for (n, _) in &typed {
         params.push(Param::positional(Symbol::from(n.as_str())));
@@ -661,6 +704,15 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
                 kind: ParamKind::Required,
             });
         }
+        for helper in &closure_helpers {
+            let name = crate::naming::safe_local(helper.as_str());
+            new_params.push(Param::positional(Symbol::from(name.clone())));
+            sig_params.push(TyParam {
+                name: Symbol::from(name),
+                ty: lx.controller_helper_types.get(helper).cloned().unwrap_or(Ty::Untyped),
+                kind: ParamKind::Required,
+            });
+        }
         for p in kw_locals {
             new_params.push(p.clone());
             let is_bool_default = matches!(
@@ -712,6 +764,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         });
         locals = std::iter::once(record_name.clone())
             .chain(closure.iter().cloned())
+            .chain(closure_helpers.iter().map(|helper| crate::naming::safe_local(helper.as_str())))
             .chain(kw_locals.iter().map(|p| p.name.as_str().to_string()))
             .collect();
     }
@@ -743,6 +796,7 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
         stylesheets: app.stylesheets.clone(),
         lexxy: app.gem_lock.as_ref().is_some_and(|lock| lock.has("lexxy")),
         partial_ivars: closures.clone(),
+        partial_helpers: lx.controller_helpers.clone(),
         dyn_pools: dyn_pools.clone(),
         multipart_partials: lx.multipart_partials.clone(),
         partial_extras: lx.partial_extras.clone(),
@@ -761,6 +815,14 @@ fn build_library_class(view: &View, lx: &ViewLowerCtx, type_body: bool) -> Libra
     // inline form_with makes; `f.submit`'s default text branches on
     // it).
     let mut rewritten = rewritten;
+    let mut helper_reads = closure_helpers.clone();
+    if let Some(strict_locals) = &view.strict_locals {
+        helper_reads.extend(
+            strict_locals.iter().map(|param| param.name.clone())
+                .filter(|name| lx.visible_controller_helpers.contains(name)),
+        );
+    }
+    rewrite_controller_helper_reads(&mut rewritten, &helper_reads);
     let mut prelude: Vec<Expr> = Vec::new();
     if let Some(binding) = form_binding {
         let record_var = Symbol::from(binding.record_local.as_str());
@@ -2017,6 +2079,7 @@ pub(crate) fn build_view_signature(
 #[derive(Default)]
 pub(crate) struct ViewArgs {
     pub ivars: Vec<Symbol>,
+    pub controller_helpers: Vec<Symbol>,
     pub uses_action_name: bool,
     pub uses_controller_name: bool,
     /// The view's `url_for` options hash needs the request's path
@@ -2634,6 +2697,7 @@ pub(crate) fn render_locals_keys(
 pub struct PartialCallContract {
     pub record: String,
     pub closure: Vec<String>,
+    pub controller_helpers: Vec<String>,
     pub extras: Vec<String>,
     /// A strict-locals partial (`<%# locals: (…) -%>`) takes its
     /// non-record locals as KEYWORD params (see the strict-locals
@@ -2696,8 +2760,10 @@ pub(crate) fn partial_call_contracts(
     views: &[View],
     controllers: &[crate::dialect::Controller],
     library_classes: &[crate::dialect::LibraryClass],
+    visible_helpers: &std::collections::BTreeSet<Symbol>,
 ) -> std::collections::HashMap<(String, String), PartialCallContract> {
     let closures = view_ivar_closures(views, controllers);
+    let helper_closures = controller_helper_closures(views, visible_helpers, controllers);
     let keys_map = render_locals_keys(views, controllers, library_classes);
     let mut out = std::collections::HashMap::new();
     for view in views {
@@ -2721,10 +2787,12 @@ pub(crate) fn partial_call_contracts(
                 })
                 .unwrap_or_default();
             out.insert(
-                key,
+                key.clone(),
                 PartialCallContract {
                     record: declared[0].clone(),
                     closure,
+                    controller_helpers: helper_closures.get(&key).into_iter().flatten()
+                        .map(|name| crate::naming::safe_local(name.as_str())).collect(),
                     extras: declared[1..].to_vec(),
                     keyword_extras: true,
                 },
@@ -2752,10 +2820,12 @@ pub(crate) fn partial_call_contracts(
         }
         drop_closure_names(&mut extras, &closure);
         out.insert(
-            key,
+            key.clone(),
             PartialCallContract {
                 record,
                 closure,
+                controller_helpers: helper_closures.get(&key).into_iter().flatten()
+                    .map(|name| crate::naming::safe_local(name.as_str())).collect(),
                 extras,
                 keyword_extras: false,
             },
@@ -2764,9 +2834,90 @@ pub(crate) fn partial_call_contracts(
     out
 }
 
+/// Helpers used by each view, including transitively rendered partials.
+pub(crate) fn controller_helper_closures(
+    views: &[View],
+    visible_helpers: &std::collections::BTreeSet<Symbol>,
+    controllers: &[crate::dialect::Controller],
+) -> std::collections::HashMap<ViewKey, Vec<Symbol>> {
+    use std::collections::{BTreeSet, HashMap};
+    let pools = dynamic_partial_pools(controllers);
+    let mut closure: HashMap<ViewKey, BTreeSet<Symbol>> = HashMap::new();
+    let mut edges: HashMap<ViewKey, Vec<ViewKey>> = HashMap::new();
+    for view in views {
+        if !crate::lower::view::lowers_through_view_path(view) { continue; }
+        let (dir, _) = split_view_name(view.name.as_str());
+        if dir == "layouts" { continue; }
+        let Some(key) = view_key_of(view) else { continue };
+        let mut reads = BTreeSet::new();
+        collect_controller_helper_reads(&view.body, visible_helpers, &mut reads);
+        if let Some(locals) = &view.strict_locals {
+            reads.retain(|helper| !locals.iter().any(|param| param.name == *helper));
+        }
+        closure.entry(key.clone()).or_default().extend(reads);
+        let mut children = render_partial_keys(&view.body, dir, &pools);
+        children.extend(dynamic_render_edges(&view.body, dir, &pools).0);
+        edges.entry(key).or_default().extend(children);
+    }
+    loop {
+        let mut changed = false;
+        for key in edges.keys().cloned().collect::<Vec<_>>() {
+            let inherited: BTreeSet<_> = edges.get(&key).into_iter().flatten()
+                .filter_map(|child| closure.get(child))
+                .flat_map(|helpers| helpers.iter().cloned()).collect();
+            let entry = closure.entry(key).or_default();
+            for helper in inherited { changed |= entry.insert(helper); }
+        }
+        if !changed { break; }
+    }
+    closure.into_iter().map(|(key, values)| (key, values.into_iter().collect())).collect()
+}
+
+fn collect_controller_helper_reads(
+    expr: &Expr,
+    visible_helpers: &std::collections::BTreeSet<Symbol>,
+    out: &mut std::collections::BTreeSet<Symbol>,
+) {
+    if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
+        if args.is_empty() && visible_helpers.contains(method) { out.insert(method.clone()); }
+    }
+    expr.node.for_each_child(&mut |child| collect_controller_helper_reads(child, visible_helpers, out));
+}
+
+fn rewrite_controller_helper_reads(expr: &mut Expr, helpers: &[Symbol]) {
+    expr.node.for_each_child_mut(&mut |child| rewrite_controller_helper_reads(child, helpers));
+    let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node else { return };
+    if !args.is_empty() || !helpers.contains(method) { return; }
+    *expr = Expr::new(expr.span, ExprNode::Var {
+        id: VarId(0), name: Symbol::from(crate::naming::safe_local(method.as_str())),
+    });
+}
+
+fn controller_helper_types(
+    views: &[View],
+    visible_helpers: &std::collections::BTreeSet<Symbol>,
+) -> std::collections::HashMap<Symbol, crate::ty::Ty> {
+    fn collect(expr: &Expr, visible: &std::collections::BTreeSet<Symbol>, out: &mut std::collections::HashMap<Symbol, crate::ty::Ty>) {
+        if let ExprNode::Send { recv: None, method, args, block: None, .. } = &*expr.node {
+            if visible.contains(method) && args.is_empty() {
+                if let Some(ty) = &expr.ty {
+                    if !matches!(ty, crate::ty::Ty::Untyped | crate::ty::Ty::Var { .. }) {
+                        out.insert(method.clone(), ty.clone());
+                    } else { out.entry(method.clone()).or_insert_with(|| ty.clone()); }
+                }
+            }
+        }
+        expr.node.for_each_child(&mut |child| collect(child, visible, out));
+    }
+    let mut out = std::collections::HashMap::new();
+    for view in views { collect(&view.body, visible_helpers, &mut out); }
+    out
+}
+
 pub(crate) fn action_view_ivar_map(
     views: &[crate::dialect::View],
     controllers: &[crate::dialect::Controller],
+    visible_helpers: &std::collections::BTreeSet<Symbol>,
 ) -> std::collections::HashMap<(String, String), ViewArgs> {
     // The controller passes an action view its full render-tree ivar
     // closure (its own reads ∪ its partials' needs, including dynamic-
@@ -2774,6 +2925,7 @@ pub(crate) fn action_view_ivar_map(
     // deep partial reads (e.g. @user) is threaded even when the action
     // view itself doesn't read it.
     let closures = view_ivar_closures(views, controllers);
+    let helper_closures = controller_helper_closures(views, visible_helpers, controllers);
     let mut out = std::collections::HashMap::new();
     for v in views {
         let (dir, base) = split_view_name(v.name.as_str());
@@ -2845,6 +2997,9 @@ pub(crate) fn action_view_ivar_map(
             key,
             ViewArgs {
                 ivars,
+                controller_helpers: view_key_of(v)
+                    .and_then(|view_key| helper_closures.get(&view_key).cloned())
+                    .unwrap_or_default(),
                 uses_action_name: view_uses_bare_name(&v.body, "action_name"),
                 uses_controller_name: view_uses_bare_name(&v.body, "controller_name"),
                 uses_path_parameters: view_uses_url_options_hash(&v.body),
@@ -4466,6 +4621,7 @@ pub(super) struct ViewCtx {
     /// needed ivars here and passes them as call-site args (the caller's
     /// own locals — its closure ⊇ the partial's, so it always has them).
     pub(super) partial_ivars: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
+    pub(super) partial_helpers: std::rc::Rc<std::collections::HashMap<ViewKey, Vec<Symbol>>>,
     /// Partials whose body renders a `file_field` (`multipart_partials`).
     /// A `form_with` block that renders one of these is a multipart
     /// form exactly as if the field were in the block itself — Rails'

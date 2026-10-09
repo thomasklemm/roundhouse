@@ -421,7 +421,10 @@ fn cond_from_guards(
     }
     let predicate = |name: &Symbol| {
         syn(ExprNode::Send {
-            recv: None,
+            // Guards name zero-arg controller instance methods. Make
+            // implicit self explicit in shared IR so Rust emits
+            // `self.predicate()` rather than a free-function call.
+            recv: Some(syn(ExprNode::SelfRef)),
             method: name.clone(),
             args: vec![],
             block: None,

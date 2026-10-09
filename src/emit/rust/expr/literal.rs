@@ -10,8 +10,8 @@ use crate::expr::{Expr, ExprNode, InterpPart, Literal};
 
 use super::util::indent;
 use super::{
-    coerce_arg_for_param_ty, current_return_ty, emit_expr, in_return_tail,
-    with_closure_vars_scope, with_current_return_ty,
+    coerce_arg_for_param_ty, current_return_ty, emit_expr, in_return_tail, with_closure_vars_scope,
+    with_current_return_ty,
 };
 
 /// Emit a Hash literal as `std::collections::HashMap::from([(k, v), ...])`.
@@ -94,15 +94,14 @@ pub(super) fn emit_hash(entries: &[(Expr, Expr)]) -> String {
             let str_color_handled = super::has_str_coercion(v);
             let v_raw = emit_expr(v);
             let v_s = if let Some((_, ref v_ty)) = return_hash_kv {
-                // Return-tail Hash storage: keys/values land in the
-                // declared HashMap<K, V>, not at a callee param. Family
-                // 4's `Str→&str` Borrow is wrong here — V is `String`
-                // (owned), not `&str`. For Str-storage of an Ivar/Var/
-                // Send (owned-String producers), emit `.clone()` and
-                // strip any prior STR_BORROW bit so the value is
-                // owned String at the storage slot. Other v_ty shapes
-                // fall through to the param-position coerce.
-                if matches!(v_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym)
+                if matches!(v_ty, crate::ty::Ty::Untyped) {
+                    // HashMap<String, Value> return tails need every
+                    // heterogeneous column value converted, including
+                    // nullable fields and runtime calls that emit as
+                    // borrowed strings. Value::from handles both
+                    // Option<T> and already-Value expressions.
+                    format!("serde_json::Value::from({v_raw})")
+                } else if matches!(v_ty, crate::ty::Ty::Str | crate::ty::Ty::Sym)
                     && matches!(
                         &*v.node,
                         ExprNode::Ivar { .. } | ExprNode::Var { .. } | ExprNode::Send { .. }
@@ -239,9 +238,7 @@ pub(super) fn emit_closure(params: &[crate::ident::Symbol], body: &Expr) -> Stri
     // method's Option<T> return type makes tail-position conditionals
     // inside a block spuriously wrap their value in Some(...), and can
     // even produce invalid Rust at a nested block boundary.
-    let body_s = with_current_return_ty(None, || {
-        with_closure_vars_scope(body, || emit_expr(body))
-    });
+    let body_s = with_current_return_ty(None, || with_closure_vars_scope(body, || emit_expr(body)));
     if body_s.contains('\n') {
         format!("|{}| {{\n{}\n}}", ps.join(", "), indent(&body_s, 1))
     } else {

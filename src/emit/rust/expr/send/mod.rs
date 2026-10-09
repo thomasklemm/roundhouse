@@ -19,13 +19,14 @@ use coerce::coerce_arg_for_class_method;
 use dispatch::external_class_method_param_tys;
 use index::try_recv_typed_method;
 use ops::{
-    try_array_push, try_binary_operator, try_constructor_field_assign,
-    try_stdlib_class_method, try_string_append, try_unary_not,
+    try_array_push, try_binary_operator, try_constructor_field_assign, try_stdlib_class_method,
+    try_string_append, try_unary_not,
 };
 
 use super::util::{rewrite_method_name, synth_default_for_ty};
 use super::{
-    current_class_method_param_tys, emit_expr, emit_send_recv, in_class_method, is_static_method,
+    current_class_method_param_tys, emit_expr, emit_send_recv, in_class_method, in_constructor,
+    is_static_method,
 };
 
 pub(super) fn emit_send(
@@ -34,6 +35,13 @@ pub(super) fn emit_send(
     args: &[Expr],
     outer_ty: Option<&crate::ty::Ty>,
 ) -> String {
+    // Bare Rails view helpers are resolved through the ViewHelpers
+    // registry below. Let the concrete-model dom_id peephole see that
+    // same shape before registry dispatch turns it into a generic call
+    // (and passes the model to the runtime's Base-only signature).
+    if let Some(s) = try_view_helpers_dom_id(recv, method, args) {
+        return s;
+    }
     // Ruby implicit-self resolves a bare identifier to the enclosing
     // method's parameter when one shares the name (e.g. view partial
     // `def self.article(article, ...)` body references `article` as
@@ -59,6 +67,13 @@ pub(super) fn emit_send(
             return s;
         }
         return super::util::sanitize_ident(method);
+    }
+    // `ActionController::Base#request` is exposed to generated controller
+    // bodies as the active request snapshot. Resolve only an unshadowed,
+    // zero-argument bare send here; parameters and explicit receivers retain
+    // their normal Ruby lookup behavior.
+    if recv.is_none() && method == "request" && args.is_empty() {
+        return "crate::http::current_request_context()".to_string();
     }
     // Temporal reader intrinsic: `ActiveSupport.parse_db_time(s)` parses
     // stored ISO-8601 text into a native `chrono::DateTime<Utc>`. Maps to
@@ -127,15 +142,68 @@ pub(super) fn emit_send(
             }
         }
     }
-    if let Some(s) = try_constructor_field_assign(recv, method, args) { return s; }
-    if let Some(s) = try_stdlib_class_method(recv, method, args) { return s; }
-    if let Some(s) = try_binary_operator(recv, method, args) { return s; }
-    if let Some(s) = try_unary_not(recv, method, args) { return s; }
-    if let Some(s) = try_array_push(recv, method, args) { return s; }
-    if let Some(s) = try_string_append(recv, method, args) { return s; }
-    if let Some(s) = try_recv_typed_method(recv, method, args) { return s; }
-    if let Some(s) = try_view_helpers_dom_id(recv, method, args) { return s; }
-    if let Some(s) = try_view_helpers_const_escape(recv, method, args) { return s; }
+    if let Some(s) = try_constructor_field_assign(recv, method, args) {
+        return s;
+    }
+    if let Some(s) = try_stdlib_class_method(recv, method, args) {
+        return s;
+    }
+    if let Some(s) = try_binary_operator(recv, method, args) {
+        return s;
+    }
+    if let Some(s) = try_unary_not(recv, method, args) {
+        return s;
+    }
+    if let Some(s) = try_array_push(recv, method, args) {
+        return s;
+    }
+    if let Some(s) = try_string_append(recv, method, args) {
+        return s;
+    }
+    // `Regexp` String indexing emits `Option<String>` (Ruby returns
+    // nil when the regexp/capture does not match). Handle `.to_s`
+    // before the receiver-typed dispatch, which otherwise peels the
+    // receiver's nilable String type and can route this to ordinary
+    // String method emission. Ruby's nil.to_s is the empty string.
+    if method == "to_s" && args.is_empty() {
+        if let Some(Expr {
+            node,
+            ty: Some(crate::ty::Ty::Union { variants }),
+            ..
+        }) = recv
+        {
+            let is_option_string = variants.iter().any(|ty| matches!(ty, crate::ty::Ty::Nil))
+                && matches!(
+                    variants.iter().find(|ty| !matches!(ty, crate::ty::Ty::Nil)),
+                    Some(crate::ty::Ty::Str)
+                );
+            let is_regexp_index = matches!(
+                &**node,
+                ExprNode::Send {
+                    method: index_method,
+                    args: index_args,
+                    ..
+                } if index_method.as_str() == "[]"
+                    && index_args.len() == 2
+                    && matches!(
+                        index_args[0].ty.as_ref().map(super::util::peel_nil),
+                        Some(crate::ty::Ty::Class { id, .. }) if id.0.as_str() == "Regexp"
+                    )
+            );
+            if is_option_string && is_regexp_index {
+                return format!(
+                    "{}.map(|v| v.to_string()).unwrap_or_default()",
+                    emit_expr(recv.unwrap())
+                );
+            }
+        }
+    }
+    if let Some(s) = try_recv_typed_method(recv, method, args) {
+        return s;
+    }
+    if let Some(s) = try_view_helpers_const_escape(recv, method, args) {
+        return s;
+    }
     // Ruby/Rust method-name bridge. Sanitize predicates (`foo?` →
     // `foo`, `foo!` → `foo`) since Rust identifiers reject those
     // suffixes. The user-defined HWIA methods `key?`/`has_key?`/etc.
@@ -168,6 +236,48 @@ pub(super) fn emit_send(
     };
     let rewritten_method = rewrite_method_name(&effective_method);
     let args_s: Vec<String> = args.iter().map(emit_expr).collect();
+    // A class method can retain a nullable return type in its library
+    // signature even when the call-site expression has lost that union.
+    // Preserve Ruby's ordinary dispatch semantics by unwrapping only
+    // when the immediate class-method receiver is known to return an
+    // Option. Option's own inspection/combinator methods must continue
+    // to operate on the Option itself (not the wrapped value).
+    if let Some(receiver) = recv {
+        let option_method = matches!(
+            method,
+            "nil?" | "clone" | "is_none" | "is_some" | "unwrap" | "unwrap_or"
+                | "unwrap_or_default" | "map" | "and_then" | "ok_or" | "expect"
+        );
+        if !option_method {
+            if let ExprNode::Send {
+                recv: Some(class_recv),
+                method: class_method,
+                ..
+            } = &*receiver.node
+            {
+                if let ExprNode::Const { path } = &*class_recv.node {
+                    if let Some(class) = path.last() {
+                        let return_ty = super::global_class_method_return_ty(
+                            class.as_str(),
+                            class_method.as_str(),
+                        );
+                        if return_ty
+                            .as_ref()
+                            .map(super::util::is_option_ty)
+                            .unwrap_or(false)
+                        {
+                            return format!(
+                                "{}.as_ref().unwrap().{}({})",
+                                emit_expr(receiver),
+                                rewritten_method,
+                                args_s.join(", ")
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
     // Free functions / module functions (Inflector.pluralize → bare
     // pluralize() in the inflector module). Implicit-self bare calls
     // emit as bare function calls.
@@ -199,12 +309,38 @@ pub(super) fn emit_send(
         if method == "raise" && args.len() == 1 {
             return format!("panic!(\"{{}}\", {})", args_s[0]);
         }
+        // An implicit send in `def self.foo` has the class as its Ruby
+        // receiver. A same-named instance method is not a valid target there.
+        if !in_class_method() && super::is_instance_method(method) {
+            let method_args = current_class_method_param_tys(method)
+                .map(|param_tys| {
+                    args.iter()
+                        .enumerate()
+                        .map(|(index, arg)| {
+                            param_tys
+                                .get(index)
+                                .map(|param_ty| coerce_arg_for_param_ty(arg, param_ty))
+                                .unwrap_or_else(|| emit_expr(arg))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| args_s.clone());
+            if super::is_static_method(method) && super::in_constructor() {
+                let helper = format!("__rh_static_{}", super::util::sanitize_ident(method));
+                return format!("Self::{helper}({})", method_args.join(", "));
+            }
+            if !in_class_method() {
+                return format!("self.{rewritten_method}({})", method_args.join(", "));
+            }
+        }
         // Rails view helpers are instance-style Ruby calls in templates
         // (`image_tag`, `dom_id`, etc.), but their Rust implementations
         // live as associated functions on the generated ViewHelpers type.
         // Resolve only methods present in that class registry so unrelated
         // bare calls keep their existing free-function behavior.
-        if let Some(param_tys) = super::global_class_method_param_tys("ViewHelpers", &effective_method) {
+        if let Some(param_tys) =
+            super::global_class_method_param_tys("ViewHelpers", &effective_method)
+        {
             let mut helper_args: Vec<String> = args
                 .iter()
                 .enumerate()
@@ -216,14 +352,18 @@ pub(super) fn emit_send(
                 })
                 .collect();
             for i in helper_args.len()..param_tys.len() {
-                let default = super::global_class_method_param_default("ViewHelpers", &effective_method, i)
-                    .or_else(|| param_tys.get(i).and_then(synth_default_for_ty));
+                let default =
+                    super::global_class_method_param_default("ViewHelpers", &effective_method, i)
+                        .or_else(|| param_tys.get(i).and_then(synth_default_for_ty));
                 match default {
                     Some(value) => helper_args.push(value),
                     None => break,
                 }
             }
-            return format!("ViewHelpers::{rewritten_method}({})", helper_args.join(", "));
+            return format!(
+                "ViewHelpers::{rewritten_method}({})",
+                helper_args.join(", ")
+            );
         }
         if let Some(helper) = super::global_helper_method(&effective_method) {
             let mut helper_args: Vec<String> = args
@@ -249,7 +389,11 @@ pub(super) fn emit_send(
                     None => break,
                 }
             }
-            return format!("{}::{rewritten_method}({})", helper.path, helper_args.join(", "));
+            return format!(
+                "{}::{rewritten_method}({})",
+                helper.path,
+                helper_args.join(", ")
+            );
         }
         return format!("{}({})", rewritten_method, args_s.join(", "));
     }
@@ -290,44 +434,41 @@ pub(super) fn emit_send(
                     _ => inner.ty.clone(),
                 };
                 match array_ty.as_ref().map(super::util::peel_nil) {
-                    Some(crate::ty::Ty::Array { elem }) => {
-                        super::util::is_option_ty(elem)
+                    Some(crate::ty::Ty::Array { elem }) => super::util::is_option_ty(elem),
+                    _ => {
+                        r.ty.as_ref()
+                            .map(super::util::is_option_ty)
+                            .unwrap_or(false)
                     }
-                    _ => r
-                        .ty
-                        .as_ref()
-                        .map(super::util::is_option_ty)
-                        .unwrap_or(false),
                 }
             }
             // A call's `ty` comes from the callee's declared signature
             // (`article.title()` on a nullable column reads `Option
             // <String>`), so it is trustworthy here.
-            ExprNode::Send { .. } => r
-                .ty
-                .as_ref()
-                .map(super::util::is_option_ty)
-                .unwrap_or(false),
+            ExprNode::Send { .. } => {
+                r.ty.as_ref()
+                    .map(super::util::is_option_ty)
+                    .unwrap_or(false)
+            }
             // Locals are NOT trustworthy: rust can render a local with
             // a nilable body-typer Ty as a plain `&str` (the router's
             // path segments), where `.map()` doesn't compile.
             _ => false,
         };
         if recv_is_option {
-            return format!("{}.map(|v| v.to_string()).unwrap_or_default()", emit_expr(r));
+            return format!(
+                "{}.map(|v| v.to_string()).unwrap_or_default()",
+                emit_expr(r)
+            );
         }
     }
-    // Static-method routing: `self.method(args)` where `method` was
-    // classified as not-reading-self emits as `Self::method(args)`.
-    // Required inside `pub fn new` (no instance yet), and also a
-    // valid choice elsewhere for inherently-static helpers — Rust
-    // accepts both `obj.foo()` and `T::foo(...)` when `foo` doesn't
-    // take a receiver, but the static form is unambiguous.
-    //
-    // The same routing applies unconditionally inside class methods
-    // (`def self.X` bodies): Ruby's `self` *is* the class there, so
-    // every `self.method(args)` is class-level dispatch.
-    if matches!(&*r.node, ExprNode::SelfRef) && (is_static_method(method) || in_class_method()) {
+    // A static-safe instance method keeps its instance-facing wrapper;
+    // only a constructor (which has no Rust `self` yet) calls the private
+    // associated implementation. In class methods, route class-level
+    // calls normally, but never reinterpret an instance method as one.
+    let constructor_static_call = in_constructor() && is_static_method(method);
+    let class_method_call = in_class_method() && !super::is_instance_method(method);
+    if matches!(&*r.node, ExprNode::SelfRef) && (constructor_static_call || class_method_call) {
         // Callee-back-propagation: when the callee's declared param[i]
         // is `Hash<K, V>` and the arg expression is a Var whose
         // `local_var_ty` is a different `Hash<K', V'>` (or
@@ -362,10 +503,15 @@ pub(super) fn emit_send(
                 }
             }
         }
+        let target_method = if constructor_static_call {
+            format!("__rh_static_{}", super::util::sanitize_ident(method))
+        } else {
+            rewritten_method
+        };
         if coerced.is_empty() {
-            return format!("Self::{rewritten_method}()");
+            return format!("Self::{target_method}()");
         }
-        return format!("Self::{rewritten_method}({})", coerced.join(", "));
+        return format!("Self::{target_method}({})", coerced.join(", "));
     }
     // Callee-back-propagation for two recv shapes:
     //
@@ -444,7 +590,8 @@ pub(super) fn emit_send(
             args
         };
         if let Some(param_tys) = param_tys {
-            let mut out: Vec<String> = Vec::with_capacity(param_tys.len().max(effective_args.len()));
+            let mut out: Vec<String> =
+                Vec::with_capacity(param_tys.len().max(effective_args.len()));
             for (i, _) in param_tys.iter().enumerate() {
                 match (effective_args.get(i), param_tys.get(i)) {
                     // Caller-supplied arg: apply per-param coercion.
@@ -459,8 +606,7 @@ pub(super) fn emit_send(
                     // `...`-suffixed output instead of mid-word
                     // truncation.
                     (None, Some(pt)) => {
-                        if let Some(d) =
-                            super::global_class_method_param_default(class, method, i)
+                        if let Some(d) = super::global_class_method_param_default(class, method, i)
                         {
                             out.push(d);
                         } else if let Some(d) = synth_default_for_ty(pt) {
@@ -515,7 +661,11 @@ pub(super) fn emit_send(
     } else {
         args_s
     };
-    let recv_s = emit_send_recv(r);
+    let recv_s = if matches!(method, "nil?" | "clone") {
+        emit_expr(r)
+    } else {
+        emit_send_recv(r)
+    };
     // Static method dispatch — `Type.method(args)` in Ruby becomes
     // `Type::method(args)` in Rust when the receiver is a Const
     // (class/module reference). The `.` form binds to a value
@@ -528,7 +678,10 @@ pub(super) fn emit_send(
     if final_args.is_empty() {
         format!("{recv_s}{dispatch}{rewritten_method}()")
     } else {
-        format!("{recv_s}{dispatch}{rewritten_method}({})", final_args.join(", "))
+        format!(
+            "{recv_s}{dispatch}{rewritten_method}({})",
+            final_args.join(", ")
+        )
     }
 }
 
@@ -565,7 +718,9 @@ fn try_view_helpers_const_escape(
         return None;
     }
     let r = recv?;
-    let ExprNode::Const { path } = &*r.node else { return None };
+    let ExprNode::Const { path } = &*r.node else {
+        return None;
+    };
     if path.last().map(|s| s.as_str()) != Some("ViewHelpers") {
         return None;
     }
@@ -598,26 +753,33 @@ fn fold_const_escape(arg: &Expr) -> Option<String> {
         arg
     };
     match &*inner.node {
-        ExprNode::Lit { value: crate::expr::Literal::Str { value } } => {
+        ExprNode::Lit {
+            value: crate::expr::Literal::Str { value },
+        } => {
             // `{:?}` renders a valid Rust string literal with quotes
             // and escapes.
             Some(format!("{:?}", html_escape_const(value)))
         }
         // `4.to_s` — digits never need escaping; fold to the rendered
         // literal.
-        ExprNode::Send { recv: Some(r), method, args, .. }
-            if method.as_str() == "to_s" && args.is_empty() =>
-        {
-            match &*r.node {
-                ExprNode::Lit { value: crate::expr::Literal::Int { value } } => {
-                    Some(format!("{:?}", value.to_string()))
-                }
-                _ => None,
-            }
-        }
+        ExprNode::Send {
+            recv: Some(r),
+            method,
+            args,
+            ..
+        } if method.as_str() == "to_s" && args.is_empty() => match &*r.node {
+            ExprNode::Lit {
+                value: crate::expr::Literal::Int { value },
+            } => Some(format!("{:?}", value.to_string())),
+            _ => None,
+        },
         // `if cond { "a" } else { "b" }` with literal branches — escape
         // each branch at emit time, keep the cond dynamic.
-        ExprNode::If { cond, then_branch, else_branch } => {
+        ExprNode::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
             let t = fold_const_escape(then_branch)?;
             let f = fold_const_escape(else_branch)?;
             Some(format!("if {} {{ {t} }} else {{ {f} }}", emit_expr(cond)))
@@ -626,18 +788,21 @@ fn fold_const_escape(arg: &Expr) -> Option<String> {
     }
 }
 
-fn try_view_helpers_dom_id(
-    recv: Option<&Expr>,
-    method: &str,
-    args: &[Expr],
-) -> Option<String> {
+fn try_view_helpers_dom_id(recv: Option<&Expr>, method: &str, args: &[Expr]) -> Option<String> {
     if method != "dom_id" {
         return None;
     }
-    let r = recv?;
-    let ExprNode::Const { path } = &*r.node else { return None };
-    if path.last().map(|s| s.as_str()) != Some("ViewHelpers") {
-        return None;
+    match recv {
+        Some(r) => {
+            let ExprNode::Const { path } = &*r.node else {
+                return None;
+            };
+            if path.last().map(|s| s.as_str()) != Some("ViewHelpers") {
+                return None;
+            }
+        }
+        None if super::global_class_method_param_tys("ViewHelpers", method).is_some() => {}
+        None => return None,
     }
     if args.is_empty() || args.len() > 2 {
         return None;
@@ -654,7 +819,10 @@ fn try_view_helpers_dom_id(
         return None;
     }
     let prefix = crate::naming::snake_case(
-        class_name.rsplit("::").next().unwrap_or(class_name.as_str()),
+        class_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(class_name.as_str()),
     );
     let record_s = emit_expr(record);
     // 1-arg `dom_id(record)` → `"<prefix>_<id>"` with no suffix.
@@ -682,8 +850,12 @@ fn try_view_helpers_dom_id(
         suffix
     };
     let suffix_lit: Option<&str> = match &*suffix_inner.node {
-        ExprNode::Lit { value: crate::expr::Literal::Sym { value } } => Some(value.as_str()),
-        ExprNode::Lit { value: crate::expr::Literal::Str { value } } => Some(value.as_str()),
+        ExprNode::Lit {
+            value: crate::expr::Literal::Sym { value },
+        } => Some(value.as_str()),
+        ExprNode::Lit {
+            value: crate::expr::Literal::Str { value },
+        } => Some(value.as_str()),
         _ => None,
     };
     let suffix_lit = suffix_lit?;
@@ -707,10 +879,7 @@ fn try_view_helpers_dom_id(
 /// the Hash; if found, push that value; if missing (kwargs Hash
 /// silently omits optional kwargs), emit nothing for that slot and
 /// let the existing trailing-default loop synthesize the default.
-fn unpack_trailing_kwargs(
-    args: &[Expr],
-    params: &[crate::ty::Param],
-) -> Option<Vec<Expr>> {
+fn unpack_trailing_kwargs(args: &[Expr], params: &[crate::ty::Param]) -> Option<Vec<Expr>> {
     use crate::expr::{ExprNode, Literal};
     use crate::ty::ParamKind;
     let last = args.last()?;
@@ -732,12 +901,15 @@ fn unpack_trailing_kwargs(
     // Index the Hash literal's entries by key-name. Accept both Symbol
     // and String literal keys (Ruby kwargs surface either way through
     // the parser depending on call shape).
-    let mut by_name: std::collections::HashMap<String, &Expr> =
-        std::collections::HashMap::new();
+    let mut by_name: std::collections::HashMap<String, &Expr> = std::collections::HashMap::new();
     for (k, v) in entries.iter() {
         let name = match &*k.node {
-            ExprNode::Lit { value: Literal::Sym { value } } => value.as_str().to_string(),
-            ExprNode::Lit { value: Literal::Str { value } } => value.clone(),
+            ExprNode::Lit {
+                value: Literal::Sym { value },
+            } => value.as_str().to_string(),
+            ExprNode::Lit {
+                value: Literal::Str { value },
+            } => value.clone(),
             _ => return None, // dynamic key — can't unpack at emit
         };
         by_name.insert(name, v);
@@ -789,7 +961,13 @@ pub(crate) fn is_array_index_read(arg: &Expr) -> bool {
     // reaches here either bare or already assigned to a local. Only the
     // direct form is decidable here; a local's recorded type is the
     // body-typer's business.
-    let ExprNode::Send { recv: Some(r), method, args, .. } = &*arg.node else {
+    let ExprNode::Send {
+        recv: Some(r),
+        method,
+        args,
+        ..
+    } = &*arg.node
+    else {
         return false;
     };
     method.as_str() == "[]"
@@ -802,6 +980,10 @@ pub(crate) fn is_array_index_read(arg: &Expr) -> bool {
 mod helper_dispatch_tests {
     use super::emit_send;
     use crate::emit::rust::ctx::{EmitCtx, GlobalHelperMethod};
+    use crate::expr::{Expr, ExprNode, Literal};
+    use crate::ident::{ClassId, Symbol, VarId};
+    use crate::span::Span;
+    use crate::ty::{Param, ParamKind, Ty};
 
     #[test]
     fn a_unique_app_helper_bare_call_uses_its_emitted_owner() {
@@ -818,6 +1000,59 @@ mod helper_dispatch_tests {
             assert_eq!(
                 emit_send(None, "translation_button", &[], None),
                 "crate::app_classes::TranslationsHelper::translation_button()",
+            );
+        });
+    }
+
+    #[test]
+    fn bare_dom_id_of_a_concrete_model_uses_its_model_id() {
+        let mut ctx = EmitCtx::default();
+        ctx.global_class_methods.insert(
+            "ViewHelpers".to_string(),
+            std::collections::HashMap::from([(
+                "dom_id".to_string(),
+                vec![
+                    Param {
+                        name: Symbol::from("record"),
+                        ty: Ty::Class {
+                            id: ClassId(Symbol::from("Base")),
+                            args: Vec::new(),
+                        },
+                        kind: ParamKind::Required,
+                    },
+                    Param {
+                        name: Symbol::from("prefix"),
+                        ty: Ty::Union {
+                            variants: vec![Ty::Sym, Ty::Nil],
+                        },
+                        kind: ParamKind::Optional,
+                    },
+                ],
+            )]),
+        );
+        let mut record = Expr::new(
+            Span::synthetic(),
+            ExprNode::Var {
+                id: VarId(0),
+                name: Symbol::from("message"),
+            },
+        );
+        record.ty = Some(Ty::Class {
+            id: ClassId(Symbol::from("Message")),
+            args: Vec::new(),
+        });
+        let prefix = Expr::new(
+            Span::synthetic(),
+            ExprNode::Lit {
+                value: Literal::Sym {
+                    value: Symbol::from("edit"),
+                },
+            },
+        );
+        crate::emit::rust::expr::with_emit_ctx(ctx, || {
+            assert_eq!(
+                emit_send(None, "dom_id", &[record, prefix], None),
+                "format!(\"edit_message_{}\", message.clone().id())",
             );
         });
     }

@@ -101,6 +101,9 @@ pub(super) fn partial_view_call_with_record(
     for n in &contract.closure {
         view_args.push(lookup(n).unwrap_or_else(|| ivar(n.as_str(), span)));
     }
+    for helper in &contract.controller_helpers {
+        view_args.push(lookup(helper).unwrap_or_else(|| controller_helper_call(helper, span)));
+    }
     view_args.extend(contract.extras_args(lookup, || nil_expr(span), span));
     Some(Expr::new(
         span,
@@ -112,6 +115,22 @@ pub(super) fn partial_view_call_with_record(
             parenthesized: true,
         },
     ))
+}
+
+/// Evaluate a helper on the current controller instance. An explicit
+/// `self` receiver is required for inherited helpers too: unresolved
+/// implicit sends otherwise become free-function calls in Rust.
+fn controller_helper_call(name: &str, span: Span) -> Expr {
+    Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(Expr::new(span, ExprNode::SelfRef)),
+            method: Symbol::from(name),
+            args: Vec::new(),
+            block: None,
+            parenthesized: true,
+        },
+    )
 }
 
 /// Lower controller render calls to view invocations or typed inline responses.
@@ -678,6 +697,14 @@ pub(super) fn rewrite_render_to_views(
                 .iter()
                 .map(|n| ivar(n.as_str(), e.span))
                 .collect();
+            if !json_format {
+                if let Some(contract) = contract {
+                    view_args.extend(
+                        contract.controller_helpers.iter()
+                            .map(|helper| controller_helper_call(helper.as_str(), e.span)),
+                    );
+                }
+            }
             // Every view's signature carries `notice = nil, alert = nil`
             // as trailing extra params (uniform shape; see
             // `view_to_library/extra_params.rs`). Pass `@flash[:notice]`

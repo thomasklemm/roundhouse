@@ -88,10 +88,7 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
     let ret_clause = render_return(m);
     let fn_name = super::expr::sanitize_ident(m.name.as_str());
     writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
-    let return_ty = match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
-        _ => None,
-    };
+    let return_ty = method_return_ty(m);
     let param_types = collect_param_types(m);
     let body = super::expr::with_param_types(param_types, || {
         super::expr::with_current_return_ty(return_ty.clone(), || {
@@ -260,9 +257,9 @@ fn render_return(m: &MethodDef) -> String {
     if m.name.as_str().ends_with('=') {
         return String::new();
     }
-    match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => {
-            if matches!(&**ret, Ty::Nil) {
+    match method_return_ty(m).as_ref() {
+        Some(ret) => {
+            if matches!(ret, Ty::Nil) {
                 String::new()
             } else {
                 format!(" -> {}", rust_ty(ret))
@@ -270,6 +267,30 @@ fn render_return(m: &MethodDef) -> String {
         }
         _ => String::new(),
     }
+}
+
+fn method_return_ty(m: &MethodDef) -> Option<Ty> {
+    let declared = match m.signature.as_ref() {
+        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
+        _ => None,
+    };
+    if let Some(ty) = declared.as_ref().filter(|ty| !matches!(ty, Ty::Untyped)) {
+        return Some(ty.clone());
+    }
+
+    fn tail_ty(expr: &crate::expr::Expr) -> Option<Ty> {
+        match &*expr.node {
+            crate::expr::ExprNode::Seq { exprs } => exprs.last().and_then(tail_ty),
+            crate::expr::ExprNode::OpAssign {
+                op: crate::expr::OpAssignOp::OrOr,
+                value,
+                ..
+            } => value.ty.clone(),
+            _ => expr.ty.clone(),
+        }
+    }
+
+    tail_ty(&m.body).or(declared)
 }
 
 /// Parameter type rendering — borrow-aware variant of `rust_ty`.
@@ -433,14 +454,15 @@ pub(super) fn emit_instance_method(
     let mut out = String::new();
     let is_init = m.name.as_str() == "initialize";
     let sanitized = super::expr::sanitize_ident(m.name.as_str());
-    // `pub fn new(...)` constructors and static-safe methods both
-    // drop the `&self` receiver — the latter were identified by
-    // `library.rs::method_reads_self`. Call sites for static methods
-    // route through `Self::method(args)` (see expr.rs::emit_send).
+    // `pub fn new(...)` constructors and static-safe implementation
+    // helpers both drop the `&self` receiver. Static-safe methods also
+    // get an instance wrapper below so Ruby's public instance API stays
+    // callable through a value receiver.
+    let static_helper_name = format!("__rh_static_{sanitized}");
     let (fn_name, receiver): (&str, Option<&'static str>) = if is_init {
         ("new", None)
     } else if is_static {
-        (sanitized.as_str(), None)
+        (static_helper_name.as_str(), None)
     } else {
         (sanitized.as_str(), Some(render_self_receiver(mutates_self)))
     };
@@ -474,15 +496,13 @@ pub(super) fn emit_instance_method(
     } else {
         render_return(m)
     };
-    writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
+    let visibility = if is_static { "pub(crate)" } else { "pub" };
+    writeln!(out, "{visibility} fn {fn_name}{params}{ret_clause} {{").unwrap();
     // Thread the method's RBS-declared return type through to the
     // Return arm in `emit_expr` so `return nil` in a method typed
     // `-> T?` emits as `return None` instead of bare `return` (the
     // latter is E0069 in non-Unit-returning functions).
-    let return_ty = match m.signature.as_ref() {
-        Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
-        _ => None,
-    };
+    let return_ty = method_return_ty(m);
     // Build the param-name → declared-Ty map for the String coercion
     // logic in `emit_assign`. The body-typer doesn't always propagate
     // Option-ness from RBS to Var reads inside the body, so this is
@@ -624,6 +644,30 @@ pub(super) fn emit_instance_method(
         writeln!(out, "    Self {{ {} }}", fields.join(", ")).unwrap();
     }
     out.push_str("}\n");
+    if is_static {
+        let wrapper_params = render_instance_params(m, Some("&self"), block_param.as_deref());
+        let mut forwarded_args = m
+            .params
+            .iter()
+            .map(|param| super::expr::util::escape_rust_keyword(param.name.as_str()))
+            .collect::<Vec<_>>();
+        if block_param.is_some() {
+            forwarded_args.push(
+                m.block_param
+                    .as_ref()
+                    .map(|param| super::expr::util::escape_rust_keyword(param.name.as_str()))
+                    .unwrap_or_else(|| "f".to_string()),
+            );
+        }
+        writeln!(out, "\npub fn {sanitized}{wrapper_params}{ret_clause} {{").unwrap();
+        writeln!(
+            out,
+            "    Self::{static_helper_name}({})",
+            forwarded_args.join(", ")
+        )
+        .unwrap();
+        out.push_str("}\n");
+    }
     Ok(out)
 }
 

@@ -280,7 +280,10 @@ module ActionDispatch
           if int_constrained(int_params, name) && !digits_only(seg)
             return nil
           end
-          params[name] = ap
+          # The route parameter is the same value checked above. Reuse the
+          # local rather than reading `ap` again, which keeps ownership clear
+          # in strict targets while preserving Ruby's string value semantics.
+          params[name] = seg
         elsif pp != ap
           # A literal PREFIX before the `:name` in the same segment —
           # lobsters' `/~:username` and `/@:username`. Rails binds the
@@ -322,7 +325,11 @@ module ActionDispatch
     def self.capture_pairs(params)
       pairs = []
       params.each do |name, value|
-        pairs << name.to_s
+        # Force an owned string on strict targets whose Hash iterator
+        # yields borrowed keys (Rust's `HashMap::iter`, for example).
+        # Concatenating the empty string preserves the value while making
+        # the snapshot independent of the borrowed map entry.
+        pairs << (name.to_s + "")
         pairs << value
       end
       pairs

@@ -346,17 +346,22 @@ where
     r
 }
 
-/// Emit a Send's *immediate* recv. When the recv is a Var (or a Send
-/// shape that resolves to a bare param read — Ruby implicit-self), set
-/// `SUPPRESS_VAR_CLONE` for the duration so the Var arm skips its
-/// multi-read `.clone()` append. Auto-ref handles `&self`/`&mut self`
-/// at recv positions; the explicit clone was breaking `&mut self`
-/// setters (fixture loader `instance.set_id(...)`). Falls through to
-/// plain `emit_expr` for non-Var recvs — Consts and sub-Sends manage
-/// their own recv emission.
+/// Emit a Send's *immediate* recv. When the recv is a Var or Ivar (or a
+/// Send shape that resolves to a bare param read — Ruby implicit-self),
+/// suppress owned-value cloning for the duration. Auto-ref handles
+/// `&self`/`&mut self` at recv positions; cloning there would make
+/// setters mutate a discarded copy. Consts and sub-Sends manage their
+/// own recv emission.
 pub(super) fn emit_send_recv(r: &Expr) -> String {
-    let is_bare_var = matches!(&*r.node, ExprNode::Var { .. });
-    let s = if !is_bare_var {
+    let is_bare_var = matches!(&*r.node, ExprNode::Var { .. } | ExprNode::Ivar { .. });
+    let recv_is_option = r.ty.as_ref().is_some_and(util::is_option_ty)
+        || matches!(&*r.node, ExprNode::Ivar { name }
+            if ivar_field_ty(name.as_str()).as_ref().is_some_and(util::is_option_ty));
+    let s = if is_nil_guard_receiver(r) {
+        format!("({}).unwrap()", emit_expr(r))
+    } else if recv_is_option {
+        format!("({}).clone().unwrap()", emit_expr(r))
+    } else if !is_bare_var {
         emit_expr(r)
     } else {
         let ctx = current_emit_ctx().expect("emit_send_recv called outside with_emit_ctx");
@@ -366,6 +371,28 @@ pub(super) fn emit_send_recv(r: &Expr) -> String {
         s
     };
     wrap_if_needs_parens(r, s)
+}
+
+pub(super) fn with_nil_guard_receiver<F, R>(receiver: ExprNode, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let ctx = current_emit_ctx().expect("with_nil_guard_receiver called outside with_emit_ctx");
+    ctx.nil_guard_receivers.borrow_mut().push(receiver);
+    let result = f();
+    ctx.nil_guard_receivers.borrow_mut().pop();
+    result
+}
+
+fn is_nil_guard_receiver(expr: &Expr) -> bool {
+    current_emit_ctx()
+        .map(|ctx| {
+            ctx.nil_guard_receivers
+                .borrow()
+                .iter()
+                .any(|receiver| receiver == &*expr.node)
+        })
+        .unwrap_or(false)
 }
 
 /// Stage 1 (#22): consult the `NEEDS_PARENS` bit stamped by the
@@ -539,6 +566,23 @@ where
     r
 }
 
+pub(super) fn with_instance_methods<F, R>(methods: std::collections::HashSet<String>, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let ctx = current_emit_ctx().expect("with_instance_methods called outside with_emit_ctx");
+    let prev = std::mem::replace(&mut *ctx.instance_methods.borrow_mut(), methods);
+    let r = f();
+    *ctx.instance_methods.borrow_mut() = prev;
+    r
+}
+
+pub(super) fn is_instance_method(name: &str) -> bool {
+    current_emit_ctx()
+        .map(|ctx| ctx.instance_methods.borrow().contains(name))
+        .unwrap_or(false)
+}
+
 /// Set the current class's method-name → positional-param-Tys
 /// table for the duration of `f`. Used by `library.rs` to seed the
 /// `Self::method(args)` arg-coercion lookup in emit_send. Swaps
@@ -640,6 +684,14 @@ pub(super) fn global_class_method_param_tys(
     })
 }
 
+pub(super) fn global_class_method_return_ty(class: &str, method: &str) -> Option<crate::ty::Ty> {
+    EMIT_CTX.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|ctx| ctx.lookup_return_ty(class, method))
+    })
+}
+
 /// Rich variant of `global_class_method_param_tys` returning the
 /// full `Param` list (name + ty + kind). The kwargs-unpack pre-pass
 /// in send-dispatch uses this to map a trailing-kwargs Hash literal
@@ -655,7 +707,9 @@ pub(super) fn global_class_method_params(
     })
 }
 
-pub(super) fn global_helper_method(name: &str) -> Option<crate::emit::rust::ctx::GlobalHelperMethod> {
+pub(super) fn global_helper_method(
+    name: &str,
+) -> Option<crate::emit::rust::ctx::GlobalHelperMethod> {
     current_emit_ctx().and_then(|ctx| ctx.global_helper_methods.get(name).cloned())
 }
 
@@ -707,7 +761,8 @@ pub(super) fn is_mut_var(name: &str) -> bool {
 /// class? Populated by `collect_global_class_methods`. See
 /// `EmitCtx::global_mutating_methods`.
 pub(super) fn is_global_mutating_method(name: &str) -> bool {
-    current_emit_ctx()
+    matches!(name, "destroy" | "destroy!")
+        || current_emit_ctx()
         .map(|ctx| ctx.global_mutating_methods.contains(name))
         .unwrap_or(false)
 }
@@ -766,6 +821,45 @@ fn each_block_mutates_param(body: &Expr, param: &str) -> bool {
         }
     }
     walk(body, param)
+}
+
+/// Whether an `each` block contains a Ruby non-local `return`. Ruby
+/// blocks return from their defining method; a Rust closure cannot.
+/// Do not cross into a Lambda, whose return is local to that lambda.
+fn contains_nonlocal_return(body: &Expr) -> bool {
+    fn walk(expr: &Expr) -> bool {
+        match &*expr.node {
+            ExprNode::Return { .. } => true,
+            ExprNode::Seq { exprs } => exprs.iter().any(walk),
+            ExprNode::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => walk(cond) || walk(then_branch) || walk(else_branch),
+            ExprNode::Send {
+                recv, args, block, ..
+            } => {
+                recv.as_ref().is_some_and(walk)
+                    || args.iter().any(walk)
+                    || block.as_ref().is_some_and(walk)
+            }
+            ExprNode::Assign { value, .. }
+            | ExprNode::OpAssign { value, .. }
+            | ExprNode::Raise { value }
+            | ExprNode::Splat { value }
+            | ExprNode::KeywordSplat { value } => walk(value),
+            ExprNode::Let { value, body, .. } => walk(value) || walk(body),
+            ExprNode::BoolOp { left, right, .. } => walk(left) || walk(right),
+            ExprNode::While { cond, body, .. } => walk(cond) || walk(body),
+            ExprNode::Array { elements, .. } => elements.iter().any(walk),
+            ExprNode::Hash { entries, .. } => entries
+                .iter()
+                .any(|(key, value)| walk(key) || walk(value)),
+            ExprNode::Lambda { .. } => false,
+            _ => false,
+        }
+    }
+    walk(body)
 }
 
 pub(super) fn record_back_propagated_hash(name: String) {
@@ -961,11 +1055,18 @@ fn emit_expr_inner(e: &Expr) -> String {
             }
             if in_constructor() {
                 util::escape_rust_keyword(name.as_str())
-            } else if in_return_tail() && matches!(e.ty.as_ref(), Some(t) if !is_copy_ty(t)) {
-                // Tail-position read of a non-Copy field would move
-                // out of `&self`. `attr_reader`-shaped getters are the
-                // canonical case (`def body; @body; end`); also kicks
-                // in for any tail-`@x` body.
+            } else if matches!(e.ty.as_ref(), Some(t) if !is_copy_ty(t))
+                && (in_return_tail()
+                    || !current_emit_ctx()
+                        .map(|ctx| ctx.suppress_var_clone.get())
+                        .unwrap_or(false))
+            {
+                // A non-Copy field read from `&self` must produce an
+                // owned value when used as a return value or argument;
+                // otherwise generated code moves out of the shared
+                // reference. Preserve borrowing for a field used as a
+                // method receiver, where Rust's auto-borrow is required
+                // (notably for setters).
                 format!("self.{}.clone()", util::escape_rust_keyword(name.as_str()))
             } else {
                 format!("self.{}", util::escape_rust_keyword(name.as_str()))
@@ -1108,6 +1209,19 @@ fn emit_expr_inner(e: &Expr) -> String {
                     );
                     if is_array_after_peel && params.len() == 1 {
                         let p = params[0].as_str();
+                        // Top-level Array constants are emitted as a
+                        // LazyLock<Mutex<Vec<_>>> so Rust has a stable
+                        // owner for their mutable Ruby constant value.
+                        // Bind the guard around the complete iteration;
+                        // iterating the LazyLock itself is not valid, and
+                        // borrowing from a temporary lock guard is too
+                        // short-lived for a for-loop iterator.
+                        let locked_constant = matches!(&*r.node, ExprNode::Const { .. })
+                            && matches!(
+                                r.ty.as_ref(),
+                                Some(crate::ty::Ty::Array { .. })
+                            );
+                        let recv_s = emit_expr(r);
                         // `Option<Vec<T>>` recv (`Union<Nil, Array>`)
                         // takes the read-only `.iter().flatten()` chain
                         // below; the mutating no-clone path applies only
@@ -1134,34 +1248,66 @@ fn emit_expr_inner(e: &Expr) -> String {
                         // built `let mut results`) so we never emit
                         // `iter_mut()` against a binding the borrow
                         // checker would reject.
+                        let block_mutates = each_block_mutates_param(body, p);
                         let recv_mutated = !was_option
-                            && each_block_mutates_param(body, p)
+                            && block_mutates
                             && matches!(&*r.node, ExprNode::Var { name, .. } if is_mut_var(name.as_str()));
-                        let recv_s = if recv_mutated {
+                        let recv_s = if locked_constant {
+                            "__rh_const_items".to_string()
+                        } else if recv_mutated {
                             emit_send_recv(r)
                         } else {
-                            emit_expr(r)
+                            recv_s
                         };
-                        // Closure body is its own block — see `emit_closure`.
-                        let body_s = with_closure_vars_scope(body, || emit_expr(body));
+                        let iter_chain = if was_option {
+                            ".iter().flatten()"
+                        } else if block_mutates {
+                            ".iter_mut()"
+                        } else {
+                            ".iter()"
+                        };
+                        // A Ruby `return` inside an `each` block exits
+                        // the enclosing method. Rust closures cannot do
+                        // that, so emit a native loop for this case; a
+                        // `return` in its body has the correct scope.
+                        let has_nonlocal_return = contains_nonlocal_return(body);
+                        let body_s = if has_nonlocal_return {
+                            with_nonlocal_block_vars_scope(body, || emit_expr(body))
+                        } else {
+                            // Closure body is its own block — see `emit_closure`.
+                            with_closure_vars_scope(body, || emit_expr(body))
+                        };
+                        if has_nonlocal_return {
+                            let loop_s =
+                                format!("for {p} in {recv_s}{iter_chain} {{ {body_s}; }}");
+                            return if locked_constant {
+                                format!(
+                                    "let __rh_const_items = {}.lock().unwrap(); {loop_s}",
+                                    emit_expr(r)
+                                )
+                            } else {
+                                loop_s
+                            };
+                        }
                         let closure = if body_s.contains('\n') {
                             format!("|{p}| {{\n{};\n}}", indent(&body_s, 1))
                         } else {
                             format!("|{p}| {{ {body_s}; }}")
                         };
-                        // `.iter().flatten().for_each(...)` for the
-                        // Option recv so the closure receives `&T` from
-                        // the inner Vec rather than `Vec<T>` from
-                        // Option's iter (one item if Some). Read-only
-                        // `iter()` because mutating-through-Option needs
-                        // an as_mut + unwrap chain that's overkill for
-                        // the read-only `parts << ...` framework Ruby.
-                        let iter_chain = if was_option {
-                            ".iter().flatten()"
+                        // Read-only blocks borrow elements with `.iter()`.
+                        // Mutating blocks use `.iter_mut()`; for immutable
+                        // receivers, recv_s is the owned clone above, while
+                        // mutable locals are borrowed directly so mutations
+                        // reach the original collection.
+                        let each_s = format!("{recv_s}{iter_chain}.for_each({closure})");
+                        return if locked_constant {
+                            format!(
+                                "{{ let __rh_const_items = {}.lock().unwrap(); {each_s} }}",
+                                emit_expr(r)
+                            )
                         } else {
-                            ".iter_mut()"
+                            each_s
                         };
-                        return format!("{recv_s}{iter_chain}.for_each({closure})");
                     }
                 }
             }
@@ -1262,6 +1408,15 @@ fn emit_expr_inner(e: &Expr) -> String {
             format!("f({})", args_s.join(", "))
         }
         ExprNode::Seq { exprs } => emit_seq(exprs),
+        ExprNode::Let { id, name, value, body } => with_declared_vars_scope(|| {
+            let target = LValue::Var {
+                id: *id,
+                name: name.clone(),
+            };
+            let assignment = emit_assign(&target, value);
+            let body = emit_expr_tail(body);
+            format!("{{ {assignment}; {body} }}")
+        }),
         ExprNode::Assign { target, value } => emit_assign(target, value),
         // `x += v` / `x ||= v` — desugared to the plain Assign (or the
         // `If` for `||=`/`&&=`) the arms above already emit, as Go and
@@ -1269,6 +1424,23 @@ fn emit_expr_inner(e: &Expr) -> String {
         // whole statement, so every `i += 1` loop counter in a
         // transpiled runtime body never advanced.
         ExprNode::OpAssign { target, op, value } => {
+            if matches!(op, crate::expr::OpAssignOp::OrOr)
+                && !in_constructor()
+                && let LValue::Ivar { name } = target
+            {
+                let field = util::escape_rust_keyword(name.as_str());
+                let assignment = Expr::new(
+                    e.span,
+                    ExprNode::Assign {
+                        target: target.clone(),
+                        value: value.clone(),
+                    },
+                );
+                return format!(
+                    "if self.{field}.is_none() {{ {}; }} self.{field}.as_ref().expect(\"||= initialized ivar\").clone()",
+                    emit_expr(&assignment)
+                );
+            }
             emit_expr(&crate::expr::desugar_op_assign(target, *op, value, e.span))
         }
         ExprNode::Return { value } => emit_return(value),
@@ -1421,10 +1593,12 @@ fn emit_expr_inner(e: &Expr) -> String {
         ExprNode::Raise { value } => {
             format!("panic!(\"{{}}\", {})", emit_expr(value))
         }
-        // Catch-all for IR shapes not yet implemented. Each new runtime
-        // file in Phase 2 expands this until full coverage.
+        // Keep unsupported IR explicit and syntactically valid in value
+        // position. A comment alone disappears and leaves malformed Rust
+        // such as `field = /* TODO */;`; `todo!` preserves the unsupported
+        // boundary as a runtime panic rather than pretending to implement it.
         other => format!(
-            "/* TODO rust2: ExprNode::{:?} */",
+            "todo!(\"Roundhouse Rust emitter does not support ExprNode::{:?}\")",
             std::mem::discriminant(other)
         ),
     }
@@ -1514,6 +1688,26 @@ pub(super) fn with_closure_vars_scope<R>(body: &Expr, f: impl FnOnce() -> R) -> 
     result
 }
 
+/// Scope assignments in an `each` loop body without clearing the
+/// enclosing method's return type: Ruby block `return` exits that
+/// method, unlike a return inside a Rust closure.
+fn with_nonlocal_block_vars_scope<R>(body: &Expr, f: impl FnOnce() -> R) -> R {
+    let ctx = current_emit_ctx()
+        .expect("with_nonlocal_block_vars_scope called outside with_emit_ctx");
+    let declared_snapshot = ctx.declared_vars.borrow().clone();
+    let mut_snapshot = ctx.mut_vars.borrow().clone();
+    let mut counts = std::collections::HashMap::new();
+    collect_var_assign_counts(body, &mut counts);
+    for (name, count) in counts {
+        if count > 1 || declared_snapshot.contains(&name) {
+            ctx.mut_vars.borrow_mut().insert(name);
+        }
+    }
+    let result = with_declared_vars_scope(f);
+    *ctx.mut_vars.borrow_mut() = mut_snapshot;
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::{emit_expr, emit_view_const_path, with_emit_ctx};
@@ -1549,6 +1743,35 @@ mod tests {
             Some("crate::views::users::Users".to_string()),
         );
         assert_eq!(emit_view_const_path(&path(&["Accounts::Bots"])), None);
+    }
+
+    #[test]
+    fn let_expression_emits_a_scoped_assignment_then_value() {
+        let span = Span::default();
+        let unsupported = Expr::new(
+            span,
+            ExprNode::Let {
+                id: VarId(1),
+                name: Symbol::from("value"),
+                value: Expr::new(
+                    span,
+                    ExprNode::Lit {
+                        value: Literal::Int { value: 1 },
+                    },
+                ),
+                body: Expr::new(
+                    span,
+                    ExprNode::Lit {
+                        value: Literal::Int { value: 2 },
+                    },
+                ),
+            },
+        );
+
+        with_emit_ctx(EmitCtx::default(), || {
+            let emitted = emit_expr(&unsupported);
+            assert_eq!(emitted, "{ let value = 1_i64; 2_i64 }");
+        });
     }
 
     #[test]

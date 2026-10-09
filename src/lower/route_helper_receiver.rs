@@ -90,11 +90,11 @@ fn is_helper_shaped(name: &Symbol) -> bool {
 /// Every name a call can use and reach a real `RouteHelpers` method.
 pub(crate) fn answered_names(app: &App) -> HashSet<Symbol> {
     let mut out: HashSet<Symbol> = ENGINE_MOUNTED_HELPERS.iter().map(|n| Symbol::from(*n)).collect();
-    for route in crate::lower::routes::flatten_routes(app) {
-        if !route.named || route.as_name.is_empty() {
-            continue;
-        }
-        out.insert(Symbol::from(format!("{}_path", route.as_name)));
+    // Use the same post-survey function list that emitters consume. This
+    // includes custom `direct` helpers as well as named and format routes,
+    // while excluding names that do not actually get a definition.
+    for helper in crate::lower::routes_to_library::lower_routes_to_library_functions(app) {
+        out.insert(helper.name);
     }
     out
 }
@@ -240,7 +240,7 @@ mod tests {
 
     fn app_with_room_route() -> App {
         let table = crate::ingest::ingest_routes(
-            b"Rails.application.routes.draw do\n  resources :rooms\nend\n",
+            b"Rails.application.routes.draw do\n  resources :rooms\n  direct :custom_room do |options|\n    route_for :room\n  end\nend\n",
             "config/routes.rb",
         )
         .expect("routes ingest");
@@ -278,6 +278,30 @@ mod tests {
         let mut lcs = vec![helper_module("Presenter", vec![method("link", bare_call("room_path"))])];
         qualify_lcs(&mut lcs, &app);
         assert_eq!(receiver_of(&lcs[0].methods[0].body).as_deref(), Some("RouteHelpers"));
+    }
+
+    #[test]
+    fn direct_route_helper_is_qualified_in_an_app_class() {
+        let app = app_with_room_route();
+        let mut app_class = helper_module("Presenter", vec![method("link", bare_call("custom_room_path"))]);
+        app_class.is_module = false;
+        let mut lcs = vec![app_class];
+        qualify_lcs(&mut lcs, &app);
+        assert_eq!(receiver_of(&lcs[0].methods[0].body).as_deref(), Some("RouteHelpers"));
+    }
+
+    #[test]
+    fn owner_method_keeps_precedence_over_same_named_route_helper() {
+        let app = app_with_room_route();
+        let mut app_class = helper_module(
+            "Presenter",
+            vec![method("room_path", bare_call("room_path")), method("link", bare_call("room_path"))],
+        );
+        app_class.is_module = false;
+        let mut lcs = vec![app_class];
+        qualify_lcs(&mut lcs, &app);
+        assert_eq!(receiver_of(&lcs[0].methods[0].body), None);
+        assert_eq!(receiver_of(&lcs[0].methods[1].body), None);
     }
 
     /// campfire's `Messages::AttachmentPresentation` calls

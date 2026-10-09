@@ -371,8 +371,31 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // the real `EmitCtx` (populated below by
     // `collect_global_class_methods`) wraps the subsequent per-file
     // app emit loop.
+    let runtime_inheritance_snapshot: Vec<crate::dialect::LibraryClass> =
+        crate::emit::rust::expr::with_emit_ctx(EmitCtx::default(), || {
+            crate::runtime_loader::rust_units(|_path, classes| classes)
+        })
+        .expect("rust runtime class snapshot failed (Ruby source error)")
+        .into_iter()
+        .flat_map(|unit| unit.classes)
+        .collect();
     let runtime_units = crate::emit::rust::expr::with_emit_ctx(EmitCtx::default(), || {
         crate::runtime_loader::rust_units(|_path, mut classes| {
+            let available_classes: Vec<crate::dialect::LibraryClass> = app
+                .library_classes
+                .iter()
+                .chain(runtime_inheritance_snapshot.iter())
+                .chain(classes.iter())
+                .cloned()
+                .collect();
+            crate::lower::rust_inheritance::flatten_inherited_initializers(
+                &mut classes,
+                &available_classes,
+            );
+            crate::lower::rust_inheritance::flatten_inherited_instance_methods(
+                &mut classes,
+                &available_classes,
+            );
             let registry = crate::emit::rust::decide::str_color::build_registry(&classes, &[]);
             crate::emit::rust::decide::str_color::color_classes(&mut classes, &registry);
             // Annotate every instance method's `mutates_self` flag. Used by
@@ -445,39 +468,6 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                  pub fn set_yield(content: &str) { ViewHelpers::set_yield(content) }\n\
                  pub fn get_yield() -> String { ViewHelpers::get_yield() }\n",
             );
-        }
-        // Wedge 2b minimum: append a concrete `axum::Router` builder
-        // to the transpiled `src/router.rs`. The transpiled body
-        // carries the abstract `Route` / `MatchResult` / `Router::
-        // match` surface from `runtime/ruby/action_dispatch/router.rb`;
-        // downstream call sites — `main.rs` via `server::start
-        // (router::router(), …)` + `axum_test::TestServer::new(
-        // router::router())` in controller tests — want a concrete
-        // `axum::Router`. The wrappers that bridge the lowered
-        // controller actions (`impl X { pub fn show(&mut self) }`)
-        // to axum's free-fn-extractor handler signature aren't
-        // emitted yet (follow-on wedge 2c), so this builder lands
-        // empty: the produced `Router::new()` compiles, satisfies
-        // `main.rs` + `TestServer::new(...)`, and dispatches every
-        // path to 404. Once 2c lands per-action handler wrappers
-        // emitted alongside each controller, this builder grows
-        // `.route(...)` entries and gate 2 (`scripts/compare rust`)
-        // opens.
-        if unit.out_path.ends_with("router.rs") {
-            // Wedge 2c.2: concrete `pub fn router() -> axum::Router`
-            // assembled from the FlatRoute table. Each route lands as
-            // a `.route(path, get/post/patch/delete(...))` entry
-            // dispatching to the per-controller `_axum_<action>` free
-            // fn that `render_axum_handler_wrappers` emits alongside
-            // each controller. Multi-verb endpoints chain through the
-            // MethodRouter builder (`.get(...).post(...)`).
-            let flat_routes = crate::lower::flatten_routes(app);
-            let router_body = render_axum_router_body(&flat_routes);
-            content.push_str(&format!(
-                "\n// rust2 wedge 2c.2: concrete axum router.\n\
-                 #[allow(dead_code)]\n\
-                 pub fn router() -> axum::Router {{\n{router_body}}}\n",
-            ));
         }
         files.push(EmittedFile {
             path: unit.out_path,
@@ -590,7 +580,12 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         // by `request_format`-driven name selection — both variants
         // need to land on the same `impl Articles { ... }`.
         let mut raw_lcs =
-            crate::lower::lower_views_to_library_classes(&app.views, app, view_extras.clone());
+            crate::lower::view_to_library::lower_views_to_library_classes_with_controller_helpers(
+                &app.views,
+                app,
+                view_extras.clone(),
+                &app.view_visible_controller_methods,
+            );
         raw_lcs.extend(crate::lower::lower_jbuilder_to_library_classes(
             &app.views,
             app,
@@ -657,13 +652,20 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             &route_helper_funcs,
         ));
         let assocs = crate::lower::model_associations::compute_association_graph(app);
-        let mut lcs = crate::lower::lower_controllers_with_arel_views_and_assocs(
-            &app.controllers,
-            controller_extras,
-            Some(&app.schema),
-            &app.views,
-            &assocs,
-        );
+        let mut lcs =
+            crate::lower::controller_to_library::lower_controllers_with_arel_views_assocs_and_routes(
+                &app.controllers,
+                controller_extras,
+                crate::lower::controller_to_library::LowerControllerOptions {
+                    schema: Some(&app.schema),
+                    views: &app.views,
+                    assocs: &assocs,
+                    view_visible_controller_methods: Some(
+                        &app.view_visible_controller_methods,
+                    ),
+                    ..Default::default()
+                },
+            );
         let registry = crate::emit::rust::decide::str_color::build_registry(&lcs, &[]);
         crate::emit::rust::decide::str_color::color_classes(&mut lcs, &registry);
         crate::analyze::mutates_self::propagate(&mut lcs);
@@ -673,6 +675,33 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     } else {
         Vec::new()
     };
+
+    // Route only to controller LCs that are actually emitted under
+    // `src/controllers/`. Rust moves origin-backed synthesized classes to
+    // the models tree, so `app.controllers` alone is not an authoritative
+    // handler set. The built-in Rails health-check target is another
+    // deliberate omission: its route is synthesized, but Rust has no emitted
+    // handler implementation for it.
+    let emitted_handlers: std::collections::HashSet<(String, String)> = controller_lcs
+        .iter()
+        .filter(|lc| {
+            lc.origin.is_none() && lc.name.0.as_str() != "Rails::HealthController"
+        })
+        .flat_map(|lc| {
+            lc.methods.iter().map(move |method| {
+                (lc.name.0.as_str().to_string(), method.name.as_str().to_string())
+            })
+        })
+        .collect();
+    let flat_routes = crate::lower::flatten_routes(app);
+    let router_body = render_axum_router_body(&flat_routes, &emitted_handlers);
+    if let Some(router) = files.iter_mut().find(|file| file.path.ends_with("router.rs")) {
+        router.content.push_str(&format!(
+            "\n// rust2 wedge 2c.2: concrete axum router.\n\
+             #[allow(dead_code)]\n\
+             pub fn router() -> axum::Router {{\n{router_body}}}\n",
+        ));
+    }
 
     // App-owned support classes (Current, helpers, POROs in app/ and
     // lib/) are distinct from the framework runtime and Rails components
@@ -723,6 +752,9 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
         })
         .cloned()
         .collect();
+    // Route-helper definitions and their call-site demand have now been
+    // surveyed; qualify app-owned bare calls against that emitted set.
+    crate::lower::route_helper_receiver::qualify_lcs(&mut app_lcs, app);
     // Rails helper modules are included into views as module functions.
     // Represent those methods as associated functions so the lowered
     // `ApplicationHelper::foo(...)` calls have a concrete target.
@@ -738,6 +770,22 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             }
         }
     }
+    let available_classes: Vec<crate::dialect::LibraryClass> = runtime_lcs
+        .iter()
+        .chain(model_lcs.iter())
+        .chain(app_lcs.iter())
+        .chain(app.library_classes.iter())
+        .cloned()
+        .collect();
+    crate::lower::rust_inheritance::flatten_inherited_initializers(
+        &mut app_lcs,
+        &available_classes,
+    );
+    crate::lower::rust_inheritance::flatten_inherited_instance_methods_for_consumers(
+        &mut app_lcs,
+        &available_classes,
+        &view_lcs,
+    );
     if !app_lcs.is_empty() {
         let registry = crate::emit::rust::decide::str_color::build_registry(&app_lcs, &[]);
         crate::emit::rust::decide::str_color::color_classes(&mut app_lcs, &registry);
@@ -827,12 +875,13 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             files.extend(emit_app_library_classes(
                 &app_lcs,
                 &app.current_attribute_classes,
+                &model_lcs,
             ));
         }
         if !model_lcs.is_empty() {
             for lc in &model_lcs {
                 let stem = crate::naming::underscore(lc.name.0.as_str());
-                let body = match library::emit_library_class(lc) {
+                let body = match library::emit_library_class_with_constants(lc) {
                     Ok(s) => s,
                     Err(e) => emit_failure_stub(&format!("model `{}`", lc.name.0.as_str()), &e),
                 };
@@ -1056,9 +1105,11 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
             // RouteHelpers`). Append per-method delegating wrappers so
             // both call shapes resolve.
             let bare_wrappers = render_route_helpers_bare_wrappers(lc);
+            let view_helpers_import = route_helpers_view_helpers_import(&body);
+            let ruby_to_s_import = ruby_to_s_import(&body);
             files.push(EmittedFile {
                 path: PathBuf::from("src/route_helpers.rs"),
-                content: format!("{body}{bare_wrappers}"),
+                content: format!("{view_helpers_import}{ruby_to_s_import}{body}{bare_wrappers}"),
             });
         }
 
@@ -1089,6 +1140,15 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     Ok(s) => s,
                     Err(e) => emit_failure_stub(&format!("view `{}`", lc.name.0.as_str()), &e),
                 };
+                // Turbo Stream view lowering uses the shared
+                // `Broadcasts::turbo_stream_fragment` IR call. In an app
+                // view module, a bare `Broadcasts` can resolve to an app
+                // class instead of this target's runtime module, so make
+                // this one Rust runtime call unambiguous at emission.
+                let body = body.replace(
+                    "Broadcasts::turbo_stream_fragment(",
+                    "crate::broadcasts::Broadcasts::turbo_stream_fragment(",
+                );
                 // Layout bridge (mirrors Crystal's
                 // `layout: ->(body) { Views::Layouts.application(body) }`):
                 // when emitting the `Layouts` view module, append a free
@@ -1893,19 +1953,39 @@ fn render_current_attributes_resets(classes: &[crate::ident::ClassId]) -> String
 /// chain through `MethodRouter`'s builder (`.get(...).post(...)`).
 /// Hand-offs to per-controller `_axum_<action>` free fns emitted by
 /// `render_axum_handler_wrappers`.
-fn render_axum_router_body(flat_routes: &[crate::lower::FlatRoute]) -> String {
+fn render_axum_router_body(
+    flat_routes: &[crate::lower::FlatRoute],
+    emitted_handlers: &std::collections::HashSet<(String, String)>,
+) -> String {
     use crate::dialect::HttpMethod;
     use std::collections::BTreeMap;
 
+    let has_unsupported_route = flat_routes.iter().any(|route| {
+        let action = if route.action.as_str() == "new" {
+            "new_action"
+        } else {
+            route.action.as_str()
+        };
+        !emitted_handlers.contains(&(route.controller.0.as_str().to_string(), action.to_string()))
+    });
     if flat_routes.is_empty() {
-        return "    axum::Router::new()\n        .layer(axum::middleware::from_fn(crate::http::request_format_middleware))\n".to_string();
+        return "    axum::Router::new()\n        .layer(axum::middleware::from_fn(crate::http::request_format_middleware))\n        .layer(axum::middleware::from_fn(crate::http::request_context_middleware))\n".to_string();
     }
 
     let mut by_path: BTreeMap<String, Vec<&crate::lower::FlatRoute>> = BTreeMap::new();
     for r in flat_routes {
         by_path.entry(to_axum_path(&r.path)).or_default().push(r);
     }
-    let mut out = String::from("    axum::Router::new()\n");
+    let mut out = String::new();
+    if has_unsupported_route {
+        out.push_str(
+            "    // Routes whose controller/action has no Rust handler remain explicit 501s.\n\
+             async fn _roundhouse_unsupported_route() -> axum::http::StatusCode {\n\
+                 axum::http::StatusCode::NOT_IMPLEMENTED\n\
+             }\n",
+        );
+    }
+    out.push_str("    axum::Router::new()\n");
     for (path, routes) in &by_path {
         // First verb on the chain prefixes with `axum::routing::`,
         // subsequent verbs are methods on the returned MethodRouter
@@ -1920,14 +2000,23 @@ fn render_axum_router_body(flat_routes: &[crate::lower::FlatRoute]) -> String {
             // (`rooms/...`).
             let ctrl_mod = controller_module_path(r.controller.0.as_str());
             let action = r.action.as_str();
-            if i == 0 {
-                verbs.push_str(&format!(
-                    "axum::routing::{verb}(crate::controllers::{ctrl_mod}::_axum_{action})",
-                ));
+            let handler_action = if action == "new" {
+                "new_action"
             } else {
-                verbs.push_str(&format!(
-                    ".{verb}(crate::controllers::{ctrl_mod}::_axum_{action})",
-                ));
+                action
+            };
+            let handler = if emitted_handlers.contains(&(
+                r.controller.0.as_str().to_string(),
+                handler_action.to_string(),
+            )) {
+                format!("crate::controllers::{ctrl_mod}::_axum_{action}")
+            } else {
+                "_roundhouse_unsupported_route".to_string()
+            };
+            if i == 0 {
+                verbs.push_str(&format!("axum::routing::{verb}({handler})"));
+            } else {
+                verbs.push_str(&format!(".{verb}({handler})"));
             }
         }
         out.push_str(&format!("        .route({path:?}, {verbs})\n"));
@@ -1951,6 +2040,13 @@ fn render_axum_router_body(flat_routes: &[crate::lower::FlatRoute]) -> String {
     // `Extension<RequestFormatExt>` extractor fails in tests.
     out.push_str(
         "        .layer(axum::middleware::from_fn(crate::http::request_format_middleware))\n",
+    );
+    // The task-local scope lets controller and helper code access an
+    // owned snapshot during router execution. Production adds an outer
+    // scope in layout_wrap so it also remains active for post-handler
+    // layout rendering; this router layer covers direct TestServer use.
+    out.push_str(
+        "        .layer(axum::middleware::from_fn(crate::http::request_context_middleware))\n",
     );
     let _ = HttpMethod::Get; // silence unused-import lint when no routes
     out
@@ -2053,6 +2149,22 @@ fn render_route_helpers_bare_wrappers(lc: &crate::dialect::LibraryClass) -> Stri
         ));
     }
     out
+}
+
+fn route_helpers_view_helpers_import(body: &str) -> &'static str {
+    if body.contains("ViewHelpers::") {
+        "#[allow(unused_imports)]\nuse crate::view_helpers::ViewHelpers;\n"
+    } else {
+        ""
+    }
+}
+
+fn ruby_to_s_import(body: &str) -> &'static str {
+    if body.contains(".ruby_to_s()") {
+        "#[allow(unused_imports)]\nuse crate::http::RubyToS;\n"
+    } else {
+        ""
+    }
 }
 
 /// Wedge 2c.3: emit bare-fn delegates for per-fixture label getters
@@ -2298,6 +2410,7 @@ fn emit_lib_rs(emitted: &[EmittedFile]) -> EmittedFile {
 fn emit_app_library_classes(
     lcs: &[crate::dialect::LibraryClass],
     current_attribute_classes: &[crate::ident::ClassId],
+    model_lcs: &[crate::dialect::LibraryClass],
 ) -> Vec<EmittedFile> {
     let mut files = Vec::new();
     let mut entries = Vec::new();
@@ -2309,7 +2422,7 @@ fn emit_app_library_classes(
             .map(crate::naming::underscore)
             .collect::<Vec<_>>()
             .join("/");
-        let body = match library::emit_library_class_with_current_attributes(
+        let body = match library::emit_app_library_class(
             lc,
             current_attribute_classes.contains(&lc.name),
         ) {
@@ -2324,10 +2437,45 @@ fn emit_app_library_classes(
             .rsplit_once('/')
             .map(|(parent, leaf)| format!("{parent}/{leaf}_class"))
             .unwrap_or_else(|| format!("{path}_class"));
+        let route_helpers_import = if body.contains("RouteHelpers::") {
+            "#[allow(unused_imports)]\nuse crate::route_helpers::RouteHelpers;\n"
+        } else {
+            ""
+        };
+        let ruby_to_s_import = ruby_to_s_import(&body);
+        let string_io_import = if body.contains("StringIO") {
+            "#[allow(unused_imports)]\nuse crate::string_io::StringIO;\n"
+        } else {
+            ""
+        };
+        let identifiers = body
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .collect::<std::collections::HashSet<_>>();
+        let model_imports = model_lcs
+            .iter()
+            .map(|model| {
+                model
+                    .name
+                    .0
+                    .as_str()
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(model.name.0.as_str())
+            })
+            .filter(|model| *model != name && identifiers.contains(model))
+            .collect::<std::collections::BTreeSet<_>>();
+        let model_import = if model_imports.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "#[allow(unused_imports)]\nuse crate::models::{{{}}};\n",
+                model_imports.into_iter().collect::<Vec<_>>().join(", ")
+            )
+        };
         files.push(EmittedFile {
             path: PathBuf::from(format!("src/app_classes/{class_path}.rs")),
             content: format!(
-                "#[allow(unused_imports)]\nuse crate::app_classes::*;\nuse crate::view_helpers::ViewHelpers;\n{body}"
+                "#[allow(unused_imports)]\nuse crate::app_classes::*;\nuse crate::user_agent::*;\nuse crate::view_helpers::ViewHelpers;\n{route_helpers_import}{ruby_to_s_import}{string_io_import}{model_import}{body}"
             ),
         });
         entries.push((class_path, name));
@@ -2641,7 +2789,7 @@ mod nested_module_emit_tests {
         )
         .expect("app support classes ingest");
         let files = crate::emit::rust::expr::with_emit_ctx(super::EmitCtx::default(), || {
-            emit_app_library_classes(&classes, &[])
+            emit_app_library_classes(&classes, &[], &[])
         });
         let current = files
             .iter()
@@ -2672,6 +2820,66 @@ mod nested_module_emit_tests {
                 .contains("pub use application_helper_class::ApplicationHelper;")
         );
         assert!(modules.content.contains("pub use current_class::Current;"));
+    }
+
+    #[test]
+    fn app_classes_import_route_helpers_only_when_the_emitted_body_uses_them() {
+        let classes = crate::ingest::ingest_library_classes(
+            b"class ApplicationHelper\n  def self.article_link\n    RouteHelpers.articles_path(Article.new)\n  end\nend\nclass PlainHelper\n  def self.label\n    \"plain\"\n  end\nend\n",
+            "app/classes.rb",
+        )
+        .expect("app support classes ingest");
+        let model_classes = crate::ingest::ingest_library_classes(
+            b"class Article < ApplicationRecord\nend\n",
+            "app/models/article.rb",
+        )
+        .expect("model classes ingest");
+        let files = crate::emit::rust::expr::with_emit_ctx(super::EmitCtx::default(), || {
+            emit_app_library_classes(&classes, &[], &model_classes)
+        });
+        let content = |path: &str| {
+            files
+                .iter()
+                .find(|file| file.path.to_string_lossy() == path)
+                .unwrap_or_else(|| panic!("missing {path}"))
+                .content
+                .as_str()
+        };
+
+        let routed = content("src/app_classes/application_helper_class.rs");
+        assert!(routed.contains("RouteHelpers::articles_path"), "{routed}");
+        assert!(
+            routed.contains("use crate::route_helpers::RouteHelpers;"),
+            "{routed}"
+        );
+        assert!(routed.contains("use crate::models::{Article};"), "{routed}");
+        let plain = content("src/app_classes/plain_helper_class.rs");
+        assert!(
+            !plain.contains("use crate::route_helpers::RouteHelpers;"),
+            "{plain}"
+        );
+        assert!(!plain.contains("use crate::models::{Article};"), "{plain}");
+    }
+
+    #[test]
+    fn route_helpers_import_view_helpers_only_when_the_emitted_body_uses_them() {
+        assert_eq!(
+            super::route_helpers_view_helpers_import("ViewHelpers::url_encode(value)"),
+            "#[allow(unused_imports)]\nuse crate::view_helpers::ViewHelpers;\n"
+        );
+        assert_eq!(
+            super::route_helpers_view_helpers_import("\"/rooms\".to_string()"),
+            ""
+        );
+    }
+
+    #[test]
+    fn ruby_to_s_trait_import_is_conditional_on_emitted_calls() {
+        assert_eq!(
+            super::ruby_to_s_import("value.ruby_to_s()"),
+            "#[allow(unused_imports)]\nuse crate::http::RubyToS;\n"
+        );
+        assert_eq!(super::ruby_to_s_import("value.to_string()"), "");
     }
 
     #[test]
@@ -2777,6 +2985,7 @@ type GlobalMethodsMap =
     std::collections::HashMap<String, std::collections::HashMap<String, Vec<crate::ty::Param>>>;
 type GlobalDefaultsMap =
     std::collections::HashMap<String, std::collections::HashMap<String, Vec<Option<String>>>>;
+type GlobalReturnsMap = std::collections::HashMap<String, std::collections::HashMap<String, crate::ty::Ty>>;
 
 fn collect_global_class_methods(
     model_lcs: &[crate::dialect::LibraryClass],
@@ -2796,12 +3005,14 @@ fn collect_global_class_methods(
         lc: &LibraryClass,
         out: &mut GlobalMethodsMap,
         out_defaults: &mut GlobalDefaultsMap,
+        out_returns: &mut GlobalReturnsMap,
         out_mutating: &mut std::collections::HashSet<String>,
     ) {
         let raw = lc.name.0.as_str();
         let class_name = raw.rsplit("::").next().unwrap_or(raw).to_string();
         let entry = out.entry(class_name.clone()).or_default();
-        let defaults_entry = out_defaults.entry(class_name).or_default();
+        let defaults_entry = out_defaults.entry(class_name.clone()).or_default();
+        let returns_entry = out_returns.entry(class_name).or_default();
         // Collect ALL methods (Class + Instance), since constructor
         // candidates (`initialize`) live in instance methods but are
         // reached at call sites as `Article::new(...)`. The instance
@@ -2853,6 +3064,12 @@ fn collect_global_class_methods(
             if m.name.as_str() == "initialize" {
                 entry.insert("new".to_string(), params.clone());
                 defaults_entry.insert("new".to_string(), defaults.clone());
+                if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+                    returns_entry.insert("new".to_string(), ret.as_ref().clone());
+                }
+            }
+            if let Some(Ty::Fn { ret, .. }) = m.signature.as_ref() {
+                returns_entry.insert(m.name.as_str().to_string(), ret.as_ref().clone());
             }
             entry.insert(m.name.as_str().to_string(), params);
             defaults_entry.insert(m.name.as_str().to_string(), defaults);
@@ -2861,29 +3078,30 @@ fn collect_global_class_methods(
 
     let mut out: GlobalMethodsMap = std::collections::HashMap::new();
     let mut out_defaults: GlobalDefaultsMap = std::collections::HashMap::new();
+    let mut out_returns: GlobalReturnsMap = std::collections::HashMap::new();
     let mut out_mutating: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut helper_methods = std::collections::HashMap::new();
     let mut ambiguous_helpers = std::collections::HashSet::new();
     for lc in model_lcs {
-        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_returns, &mut out_mutating);
     }
     if let Some(lc) = route_helpers_lc {
-        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_returns, &mut out_mutating);
     }
     if let Some(lc) = importmap_lc {
-        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_returns, &mut out_mutating);
     }
     for lc in view_lcs {
-        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_returns, &mut out_mutating);
     }
     for lc in controller_lcs {
-        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_returns, &mut out_mutating);
     }
     for lc in fixture_lcs {
-        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_returns, &mut out_mutating);
     }
     for lc in app_lcs {
-        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_returns, &mut out_mutating);
         let raw = lc.name.0.as_str();
         if !raw.rsplit("::").next().unwrap_or(raw).ends_with("Helper") {
             continue;
@@ -2955,11 +3173,12 @@ fn collect_global_class_methods(
     // arity-only `Untyped` fallback) and the coerce_arg_for_param_ty
     // families fire.
     for lc in runtime_lcs {
-        collect_one(lc, &mut out, &mut out_defaults, &mut out_mutating);
+        collect_one(lc, &mut out, &mut out_defaults, &mut out_returns, &mut out_mutating);
     }
     EmitCtx {
         global_class_methods: out,
         global_class_method_defaults: out_defaults,
+        global_class_method_returns: out_returns,
         global_mutating_methods: out_mutating,
         global_helper_methods: helper_methods,
         ..EmitCtx::default()

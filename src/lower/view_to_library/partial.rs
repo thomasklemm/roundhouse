@@ -132,11 +132,12 @@ pub(super) fn emit_render_partial(rp: &RenderPartial<'_>, ctx: &ViewCtx) -> Opti
             // render-graph fold) plus nil-default extras. No
             // record-name dedup here: `story` is a plain closure param
             // on Views::Stories.show, not a separately-passed record.
-            let call_args: Vec<Expr> = ctx
+            let mut call_args: Vec<Expr> = ctx
                 .partial_ivars
                 .get(&(module_camel.clone(), method_sym.clone()))
                 .map(|ivars| ivars.iter().map(|n| var_ref(n.clone())).collect())
                 .unwrap_or_default();
+            call_args.extend(partial_helper_args(ctx, &module_camel, &method_sym));
             let render_call = send(
                 Some(Expr::new(
                     Span::synthetic(),
@@ -287,9 +288,19 @@ fn partial_extra_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
                 // Caller bodies are post-ivar-rewrite: a reserved-word
                 // ivar (`@for`) lives there as its `safe_local` form.
                 .map(|n| var_ref(Symbol::from(crate::naming::safe_local(n.as_str()))))
-                .collect()
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+        .into_iter()
+        .chain(partial_helper_args(ctx, module, method))
+        .collect()
+}
+
+fn partial_helper_args(ctx: &ViewCtx, module: &str, method: &str) -> Vec<Expr> {
+    ctx.partial_helpers.get(&(module.to_string(), method.to_string()))
+        .into_iter().flatten()
+        .map(|name| var_ref(Symbol::from(crate::naming::safe_local(name.as_str()))))
+        .collect()
 }
 
 /// `render partial: "…", collection: xs, as: :x` — iterate `xs`, calling
@@ -692,9 +703,15 @@ fn partial_extra_named_args(
                     let safe = crate::naming::safe_local(n.as_str());
                     (safe.clone(), var_ref(Symbol::from(safe)))
                 })
-                .collect()
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+        .into_iter()
+        .chain(ctx.partial_helpers.get(&key).into_iter().flatten().map(|helper| {
+            let name = crate::naming::safe_local(helper.as_str());
+            (name.clone(), var_ref(Symbol::from(name)))
+        }))
+        .collect()
 }
 
 /// Common shape for collection / association partial renders:

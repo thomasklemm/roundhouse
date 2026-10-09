@@ -113,6 +113,47 @@ fn inherited_before_action_calls_dispatch_on_self() {
     }
 }
 
+#[test]
+fn router_only_references_emitted_controller_handlers() {
+    let tree = [
+        (
+            "app/controllers/reports_controller.rb",
+            "class ReportsController < ActionController::Base\n  def index\n  end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  get \"/reports\", to: \"reports#index\"\n  get \"/rooms/settings\", to: \"rooms/settings#show\"\n  get \"/up\", to: \"rails/health#show\"\nend\n",
+        ),
+    ]
+    .into_iter()
+    .map(|(path, source)| (PathBuf::from(path), source.as_bytes().to_vec()))
+    .collect();
+    let mut app = ingest_app_from_tree(tree).expect("ingest");
+    Analyzer::new(&app).analyze(&mut app);
+    let files = rust::emit(&app);
+    let router = files
+        .into_iter()
+        .find(|file| file.path.ends_with("router.rs"))
+        .expect("Rust router output")
+        .content;
+
+    assert!(router.contains(".route(\"/reports\""), "real controller route disappeared:\n{router}");
+    assert!(router.contains("reports_controller::_axum_index"), "real handler missing:\n{router}");
+    for (missing, path) in [
+        ("rooms::settings_controller", "/rooms/settings"),
+        ("rails::health_controller", "/up"),
+    ] {
+        assert!(!router.contains(missing), "router references non-emitted handler `{missing}`:\n{router}");
+        assert!(router.contains(&format!(".route(\"{path}\"")), "route disappeared instead of remaining explicit:\n{router}");
+    }
+    assert!(router.contains("_roundhouse_unsupported_route"), "missing handlers must not be treated as implemented:\n{router}");
+    assert!(router.contains("StatusCode::NOT_IMPLEMENTED"), "unsupported routes must fail explicitly:\n{router}");
+    assert!(
+        router.contains("request_context_middleware"),
+        "direct router users need an active request scope:\n{router}"
+    );
+}
+
 /// Execute the generated identity methods in the native Rust toolchain lane.
 ///
 /// Kept ignored for the default suite because it shells out to Cargo; CI selects
