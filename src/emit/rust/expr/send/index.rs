@@ -22,6 +22,7 @@ pub(super) fn try_recv_typed_method(
     recv: Option<&Expr>,
     method: &str,
     args: &[Expr],
+    outer_ty: Option<&crate::ty::Ty>,
 ) -> Option<String> {
     let r = recv?;
     if method == "[]" && args.len() == 1 {
@@ -36,6 +37,7 @@ pub(super) fn try_recv_typed_method(
         };
         let recv_ty = ivar_fallback.as_ref().or(r.ty.as_ref()).map(peel_nil);
         let arg_ty = args[0].ty.as_ref().map(peel_nil);
+        let result_is_option = outer_ty.is_some_and(super::super::util::is_option_ty);
         // Range index on Str/Vec receiver — `pp[1..]`. The Range
         // node emits its endpoints unmodified (`1_i64..`), but
         // slice indexing needs `usize`. Wrap the rendered range
@@ -97,6 +99,19 @@ pub(super) fn try_recv_typed_method(
                     // wrapped in `Some(...)`) need owned T to
                     // match the `Option<T>` return type.
                     if matches!(recv_ty, Some(crate::ty::Ty::Array { .. })) {
+                        if result_is_option {
+                            let access = if matches!(
+                                recv_ty,
+                                Some(crate::ty::Ty::Array { elem }) if is_copy_ty(elem)
+                            ) {
+                                "copied"
+                            } else {
+                                "cloned"
+                            };
+                            return Some(format!(
+                                "{{ let __recv = &({recv_s}); __recv.len().checked_sub({abs}_usize).and_then(|__index| __recv.get(__index)).{access}() }}"
+                            ));
+                        }
                         return Some(format!("{recv_s}[{recv_s}.len() - {abs}_usize].clone()"));
                     }
                     return Some(format!("{recv_s}[{recv_s}.len() - {abs}_usize]"));
@@ -113,6 +128,18 @@ pub(super) fn try_recv_typed_method(
         // is already the right type).
         if let Some(crate::ty::Ty::Array { elem }) = recv_ty {
             if matches!(arg_ty, Some(crate::ty::Ty::Int)) {
+                if result_is_option {
+                    let access = if is_copy_ty(elem) { "copied" } else { "cloned" };
+                    let recv_s = if matches!(&*r.node, ExprNode::Const { .. }) {
+                        format!("{}.lock().unwrap()", super::super::emit_send_recv(r))
+                    } else {
+                        super::super::emit_send_recv(r)
+                    };
+                    return Some(format!(
+                        "{recv_s}.get(({}) as usize).{access}()",
+                        emit_expr(&args[0])
+                    ));
+                }
                 let suffix = if is_copy_ty(elem) { "" } else { ".clone()" };
                 let recv_s = if matches!(&*r.node, ExprNode::Const { .. }) {
                     format!("{}.lock().unwrap()", super::super::emit_send_recv(r))

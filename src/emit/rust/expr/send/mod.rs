@@ -198,7 +198,7 @@ pub(super) fn emit_send(
             }
         }
     }
-    if let Some(s) = try_recv_typed_method(recv, method, args) {
+    if let Some(s) = try_recv_typed_method(recv, method, args, outer_ty) {
         return s;
     }
     if let Some(s) = try_view_helpers_const_escape(recv, method, args) {
