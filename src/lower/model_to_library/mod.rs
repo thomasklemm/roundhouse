@@ -2384,21 +2384,25 @@ pub fn ty_of_column(t: &ColumnType) -> Ty {
         ColumnType::Boolean => Ty::Bool,
         ColumnType::Date | ColumnType::DateTime | ColumnType::Time => Ty::Str,
         ColumnType::Binary => Ty::Str,
-        // A `json` column is stored TEXT and nothing parses it: the
+        // A schema-less `json` or `jsonb` column is stored TEXT and nothing
+        // parses it: the
         // Row field, hydration, `[]`, `attributes` and the adapter's
         // escape all move the serialized string. `Hash[String, String]`
         // was a declaration no synthesized path implemented. What gives
         // such a column STRUCTURE is a `has_json` declaration, and that
         // is modeled as typed per-key accessors over this text
         // (`lower::has_json`), not as a Hash the whole column decodes to.
-        ColumnType::Json => Ty::Str,
+        ColumnType::Json | ColumnType::Jsonb => Ty::Str,
         ColumnType::Uuid => Ty::Str,
         ColumnType::Reference { .. } => Ty::Int,
     }
 }
 
 /// The column's type AS STORED IN A RECORD — `ty_of_column` widened with
-/// `Nil` when the schema says the column is nullable. Rails' unset value
+/// `Nil` when the schema says the column is nullable or the column is
+/// database-generated. A generated attribute is unset on a new record
+/// until the INSERT computes it, even when the database column is NOT NULL.
+/// Rails' unset value
 /// for such a column is NULL, not the type's zero: a nullable unique
 /// column left unset must not collide row-to-row (lobsters'
 /// `users.password_reset_token`), and `where(merged_story_id: nil)` has
@@ -2414,7 +2418,7 @@ pub fn ty_of_column(t: &ColumnType) -> Ty {
 /// doesn't change.
 pub fn ty_of_column_slot(col: &Column) -> Ty {
     let base = ty_of_column(&col.col_type);
-    if col.nullable && !col.primary_key {
+    if (col.nullable || col.generated.is_some()) && !col.primary_key {
         Ty::Union { variants: vec![base, Ty::Nil] }
     } else {
         base
