@@ -269,7 +269,7 @@ fn render_return(m: &MethodDef) -> String {
     }
 }
 
-fn method_return_ty(m: &MethodDef) -> Option<Ty> {
+pub(super) fn method_return_ty(m: &MethodDef) -> Option<Ty> {
     let declared = match m.signature.as_ref() {
         Some(Ty::Fn { ret, .. }) => Some((**ret).clone()),
         _ => None,

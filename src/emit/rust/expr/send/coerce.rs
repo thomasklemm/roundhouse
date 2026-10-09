@@ -194,6 +194,16 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
     //    that needs an inner `.to_string()` too — out of scope for
     //    this wedge.
     if is_option_ty(param_ty) {
+        // Nil is already the complete Option value; wrapping it would
+        // produce `Some(None)` for a nullable parameter.
+        if matches!(
+            &*arg.node,
+            ExprNode::Lit {
+                value: Literal::Nil,
+            }
+        ) {
+            return "None".to_string();
+        }
         // Owned `Option<String>` field → borrowed `Option<&str>` param.
         // rust renders a nilable string PARAM as `Option<&str>` but a
         // nilable string FIELD as `Option<String>`, so passing a
@@ -230,6 +240,15 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         // the same Cast wrapper.
         if let ExprNode::Cast { value, target_ty } = &*arg.node {
             if let Some(cast_inner) = is_option_ty(target_ty).then(|| peel_nil(target_ty)) {
+                // A cast nil payload is still None, not Some(None).
+                if matches!(
+                    &*value.node,
+                    ExprNode::Lit {
+                        value: Literal::Nil,
+                    }
+                ) {
+                    return "None".to_string();
+                }
                 // Already nilable — a nullable column's Row reader
                 // returns `Option<T>` and the model setter takes the
                 // same, so `Some(..)` here would build `Option<Option
@@ -538,13 +557,18 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
         return format!("{raw}.as_deref().unwrap_or(\"\")");
     }
 
-    if param_ty.is_stringish() && arg.decisions & crate::emit::rust::decide::bits::STR_BORROW == 0 {
+    let emits_owned_class_string = rust_emits_owned_class_method(arg);
+    if param_ty.is_stringish()
+        && (arg.decisions & crate::emit::rust::decide::bits::STR_BORROW == 0
+            || emits_owned_class_string)
+    {
         // The string-color decision is authoritative about the Rust
         // representation even when the body typer left the source
         // expression Untyped. `STR_TO_OWNED` means `emit_expr` has
         // produced a Rust `String`, which must be borrowed for an
         // `&str` parameter.
         let emits_owned_string = rust_emits_owned_route_helper(arg)
+            || emits_owned_class_string
             || arg.decisions & crate::emit::rust::decide::bits::STR_TO_OWNED != 0
             || matches!(
                 &*arg.node,
@@ -553,6 +577,13 @@ pub(crate) fn coerce_arg_for_param_ty(arg: &Expr, param_ty: &crate::ty::Ty) -> S
                         && args.is_empty()
             );
         if emits_owned_string {
+            if emits_owned_class_string
+                && arg.decisions & crate::emit::rust::decide::bits::STR_BORROW != 0
+            {
+                let mut uncoerced = arg.clone();
+                uncoerced.decisions &= !crate::emit::rust::decide::bits::STR_BORROW;
+                return format!("&({})", emit_expr(&uncoerced));
+            }
             return format!("&({raw})");
         }
         // Value-shaped arg → `&str` param. Hash#fetch / Hash#[] on an
@@ -628,6 +659,31 @@ fn rust_emits_owned_route_helper(arg: &Expr) -> bool {
     path.last()
         .is_some_and(|name| name.as_str() == "RouteHelpers")
         && (method.as_str().ends_with("_path") || method.as_str().ends_with("_url"))
+}
+
+fn rust_emits_owned_class_method(arg: &Expr) -> bool {
+    let ExprNode::Send { recv, method, .. } = &*arg.node else {
+        return false;
+    };
+    let returns_owned_string = |return_ty: Option<crate::ty::Ty>| {
+        return_ty.is_some_and(|ty| matches!(ty, crate::ty::Ty::Str | crate::ty::Ty::Sym))
+    };
+    match recv {
+        Some(recv) => {
+            let ExprNode::Const { path } = &*recv.node else {
+                return false;
+            };
+            let Some(class) = path.last() else {
+                return false;
+            };
+            returns_owned_string(super::super::global_class_method_return_ty(
+                class.as_str(),
+                method.as_str(),
+            ))
+        }
+        None => super::super::global_helper_method(method.as_str())
+            .is_some_and(|helper| returns_owned_string(helper.return_ty.clone())),
+    }
 }
 
 /// When a Cast's source type renders as `serde_json::Value` at the
@@ -1001,8 +1057,9 @@ mod hash_widening_tests {
 mod string_borrow_tests {
     use super::coerce_arg_for_param_ty;
     use crate::emit::rust::ctx::EmitCtx;
-    use crate::expr::{Expr, ExprNode, InterpPart};
-    use crate::ident::Symbol;
+    use crate::emit::rust::ctx::GlobalHelperMethod;
+    use crate::expr::{BlockStyle, Expr, ExprNode, InterpPart, Literal};
+    use crate::ident::{Symbol, TyVar};
     use crate::span::Span;
     use crate::ty::Ty;
 
@@ -1091,6 +1148,98 @@ mod string_borrow_tests {
         assert!(
             emitted.contains("RouteHelpers::qr_code_path()"),
             "{emitted}"
+        );
+    }
+
+    #[test]
+    fn unresolved_bare_helper_call_with_block_is_borrowed_at_str_param() {
+        let value = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("link_to_zoom_qr_code"),
+                args: vec![],
+                block: Some(Expr::new(
+                    Span::default(),
+                    ExprNode::Lambda {
+                        params: vec![],
+                        rest_param: None,
+                        block_param: None,
+                        body: Expr::new(
+                            Span::default(),
+                            ExprNode::Lit {
+                                value: Literal::Str {
+                                    value: "qr content".to_string(),
+                                },
+                            },
+                        ),
+                        block_style: BlockStyle::Do,
+                    },
+                )),
+                parenthesized: false,
+            },
+        );
+        let mut value = value;
+        value.ty = Some(Ty::Var { var: TyVar(0) });
+
+        let mut ctx = EmitCtx::default();
+        ctx.global_helper_methods.insert(
+            "link_to_zoom_qr_code".to_string(),
+            GlobalHelperMethod {
+                path: "crate::app_classes::QrCodeHelper".to_string(),
+                params: vec![],
+                defaults: vec![],
+                return_ty: Some(Ty::Str),
+            },
+        );
+        let emitted = crate::emit::rust::expr::with_emit_ctx(ctx, || {
+            coerce_arg_for_param_ty(&value, &Ty::Str)
+        });
+
+        assert!(
+            emitted.starts_with("&(crate::app_classes::QrCodeHelper::link_to_zoom_qr_code("),
+            "expected borrowed owned helper String: {emitted}"
+        );
+        assert!(
+            emitted.contains("||"),
+            "block closure must stay in call: {emitted}"
+        );
+    }
+
+    #[test]
+    fn nullable_helper_return_is_not_borrowed_as_a_plain_string() {
+        let value = Expr::new(
+            Span::default(),
+            ExprNode::Send {
+                recv: None,
+                method: Symbol::from("maybe_label"),
+                args: vec![],
+                block: None,
+                parenthesized: false,
+            },
+        );
+        let mut value = value;
+        value.ty = Some(Ty::Var { var: TyVar(0) });
+
+        let mut ctx = EmitCtx::default();
+        ctx.global_helper_methods.insert(
+            "maybe_label".to_string(),
+            GlobalHelperMethod {
+                path: "crate::app_classes::LabelsHelper".to_string(),
+                params: vec![],
+                defaults: vec![],
+                return_ty: Some(Ty::Union {
+                    variants: vec![Ty::Str, Ty::Nil],
+                }),
+            },
+        );
+        let emitted = crate::emit::rust::expr::with_emit_ctx(ctx, || {
+            coerce_arg_for_param_ty(&value, &Ty::Str)
+        });
+
+        assert!(
+            !emitted.starts_with("&("),
+            "Option<String> must not be borrowed as a plain String: {emitted}"
         );
     }
 }

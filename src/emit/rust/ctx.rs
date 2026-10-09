@@ -34,6 +34,7 @@ pub struct GlobalHelperMethod {
     pub path: String,
     pub params: Vec<Ty>,
     pub defaults: Vec<Option<String>>,
+    pub return_ty: Option<Ty>,
 }
 
 /// Emit-pipeline state. Built once per `rust::emit` call (in

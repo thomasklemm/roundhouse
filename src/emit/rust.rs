@@ -3159,6 +3159,7 @@ fn collect_global_class_methods(
                     path: path.clone(),
                     params,
                     defaults,
+                    return_ty: crate::emit::rust::method::method_return_ty(method),
                 },
             );
         }

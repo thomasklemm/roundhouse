@@ -994,6 +994,7 @@ mod helper_dispatch_tests {
                 path: "crate::app_classes::TranslationsHelper".to_string(),
                 params: vec![],
                 defaults: vec![],
+                return_ty: None,
             },
         );
         crate::emit::rust::expr::with_emit_ctx(ctx, || {
