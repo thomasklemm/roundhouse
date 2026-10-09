@@ -378,7 +378,7 @@ fn emit_library_class_inner(
                                 MethodReceiver::Class => {
                                     // `def self.X` → `pub fn X(...)` with no receiver.
                                     // Module-style call from within the impl block.
-                                    super::method::emit_module_method(m)?
+                                    super::method::emit_module_method_for_class(m, &name)?
                                 }
                                 MethodReceiver::Instance => {
                                     let is_static = static_method_names.contains(m.name.as_str());
@@ -750,7 +750,7 @@ fn emit_module_singleton(
                     first = false;
                     // Module-singleton methods are class methods by
                     // construction (detection in `emit_library_class`).
-                    let body = super::method::emit_module_method(m)?;
+                    let body = super::method::emit_module_method_for_class(m, name)?;
                     for line in body.lines() {
                         if line.is_empty() {
                             writeln!(out).unwrap();

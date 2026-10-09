@@ -76,6 +76,17 @@ fn render_self_receiver(mutates: bool) -> &'static str {
 /// so no extra `mod NAME { ... }` wrapping is needed — callers use
 /// `crate::inflector::pluralize(...)`.
 pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
+    emit_module_method_with_owner(m, None)
+}
+
+pub(super) fn emit_module_method_for_class(
+    m: &MethodDef,
+    owner: &str,
+) -> Result<String, String> {
+    emit_module_method_with_owner(m, Some(owner))
+}
+
+fn emit_module_method_with_owner(m: &MethodDef, owner: Option<&str>) -> Result<String, String> {
     if !matches!(m.receiver, MethodReceiver::Class) {
         return Err(format!(
             "rust::emit_module_method: only class methods supported in Module mode, \
@@ -84,7 +95,7 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
         ));
     }
     let mut out = String::new();
-    let params = render_params(m);
+    let params = render_params(m, owner);
     let ret_clause = render_return(m);
     let fn_name = super::expr::sanitize_ident(m.name.as_str());
     writeln!(out, "pub fn {fn_name}{params}{ret_clause} {{").unwrap();
@@ -125,7 +136,7 @@ pub(super) fn emit_module_method(m: &MethodDef) -> Result<String, String> {
     Ok(out)
 }
 
-fn render_params(m: &MethodDef) -> String {
+fn render_params(m: &MethodDef, owner: Option<&str>) -> String {
     // Pull positional + kwarg sig params (filter Block — handled separately).
     // The Ruby `def` syntax omits `&block` from `m.params` but the
     // RBS-derived signature appends a `Block` Param at the end. Without
@@ -163,6 +174,11 @@ fn render_params(m: &MethodDef) -> String {
         .map(|(i, p)| {
             let name = super::expr::util::escape_rust_keyword(p.name.as_str());
             match sig_params.and_then(|sp| sp.get(i)) {
+                Some(sig_p)
+                    if owner == Some("RouteHelpers") && matches!(&sig_p.ty, Ty::Int) =>
+                {
+                    format!("{name}: impl std::fmt::Display")
+                }
                 Some(sig_p) => format!("{name}: {}", rust_param_ty(&sig_p.ty)),
                 None => format!("{name}: ()"),
             }

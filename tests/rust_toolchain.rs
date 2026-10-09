@@ -121,8 +121,12 @@ fn router_only_references_emitted_controller_handlers() {
             "class ReportsController < ActionController::Base\n  def index\n  end\nend\n",
         ),
         (
+            "app/controllers/hidden_controller.rb",
+            "class HiddenController < ActionController::Base\n  private\n  def index\n  end\nend\n",
+        ),
+        (
             "config/routes.rb",
-            "Rails.application.routes.draw do\n  get \"/reports\", to: \"reports#index\"\n  get \"/rooms/settings\", to: \"rooms/settings#show\"\n  get \"/up\", to: \"rails/health#show\"\nend\n",
+            "Rails.application.routes.draw do\n  get \"/reports\", to: \"reports#index\"\n  get \"/hidden\", to: \"hidden#index\"\n  get \"/rooms/settings\", to: \"rooms/settings#show\"\n  get \"/up\", to: \"rails/health#show\"\nend\n",
         ),
     ]
     .into_iter()
@@ -132,14 +136,16 @@ fn router_only_references_emitted_controller_handlers() {
     Analyzer::new(&app).analyze(&mut app);
     let files = rust::emit(&app);
     let router = files
-        .into_iter()
+        .iter()
         .find(|file| file.path.ends_with("router.rs"))
         .expect("Rust router output")
-        .content;
+        .content
+        .clone();
 
     assert!(router.contains(".route(\"/reports\""), "real controller route disappeared:\n{router}");
     assert!(router.contains("reports_controller::_axum_index"), "real handler missing:\n{router}");
     for (missing, path) in [
+        ("hidden_controller", "/hidden"),
         ("rooms::settings_controller", "/rooms/settings"),
         ("rails::health_controller", "/up"),
     ] {
@@ -151,6 +157,15 @@ fn router_only_references_emitted_controller_handlers() {
     assert!(
         router.contains("request_context_middleware"),
         "direct router users need an active request scope:\n{router}"
+    );
+    let hidden = files
+        .iter()
+        .find(|file| file.path.ends_with("hidden_controller.rs"))
+        .expect("hidden controller output");
+    assert!(
+        !hidden.content.contains("pub async fn _axum_index"),
+        "a controller with no dispatcher must not emit a route wrapper:\n{}",
+        hidden.content
     );
 }
 

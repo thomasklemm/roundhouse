@@ -684,9 +684,8 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
     // handler implementation for it.
     let emitted_handlers: std::collections::HashSet<(String, String)> = controller_lcs
         .iter()
-        .filter(|lc| {
-            lc.origin.is_none() && lc.name.0.as_str() != "Rails::HealthController"
-        })
+        .filter(|lc| lc.origin.is_none() && lc.name.0.as_str() != "Rails::HealthController")
+        .filter(|lc| lc.methods.iter().any(|method| method.name.as_str() == "process_action"))
         .flat_map(|lc| {
             lc.methods.iter().map(move |method| {
                 (lc.name.0.as_str().to_string(), method.name.as_str().to_string())
@@ -1302,11 +1301,15 @@ pub fn emit(app: &App) -> Vec<EmittedFile> {
                     // into `c.flash` only when the field exists; the
                     // outgoing path is field-independent (thread-local).
                     let has_flash = body.contains("pub flash:");
+                    let has_process_action = lc
+                        .methods
+                        .iter()
+                        .any(|method| method.name.as_str() == "process_action");
                     let axum_wrappers = render_axum_handler_wrappers(
                         lc.name.0.as_str(),
                         &flat_routes_2c,
                         has_flash,
-                        sets_action_name,
+                        has_process_action,
                         &app.current_attribute_classes,
                     );
                     let content = format!("{CONTROLLER_IMPORTS}{body}{ac_shim}{axum_wrappers}");
@@ -1751,16 +1754,14 @@ fn action_name_shim(struct_name: &str) -> String {
 ///      populated `params`. Default-derive on every emitted struct
 ///      (wedge 2c.1) gives every ivar a zero value; the action body
 ///      mutates them as needed (e.g., `self.articles = Article::all()`).
-///   4. Call the action method by name. Rails' `new` action lands
-///      as `new_action` on the controller struct (Rust reserves
-///      `new` for `Self::new` constructors) — substituted here.
+///   4. Enter the generated `process_action` dispatcher once, so Rails
+///      callbacks run before it dispatches the original action name.
 ///   5. Snapshot the response state and translate to axum.
 ///
-/// Path extractors use the route's `path_params` order: `Path<i64>`
-/// for one param, `Path<(i64, i64, …)>` for multiple. Body extractor
-/// (POST/PATCH/PUT) is `Form<HashMap<String, String>>`; the
-/// `params_from_form` helper splits Rails-shape bracket keys
-/// (`article[title]`) into nested JSON.
+/// Path extractors use the route's `path_params` order as `String` values;
+/// generated controller params parse the numeric identifiers afterward.
+/// Body extractor (POST/PATCH/PUT) is `Form<HashMap<String, String>>`; the
+/// `params_from_form` helper splits Rails-shape bracket keys into nested JSON.
 ///
 /// Bodies on DELETE are uncommon and not generated — Rails scaffold
 /// `destroy` reads only `:id` from the path.
@@ -1768,10 +1769,13 @@ fn render_axum_handler_wrappers(
     controller_name: &str,
     flat_routes: &[crate::lower::FlatRoute],
     has_flash: bool,
-    sets_action_name: bool,
+    has_process_action: bool,
     current_attribute_classes: &[crate::ident::ClassId],
 ) -> String {
     use crate::dialect::HttpMethod;
+    if !has_process_action {
+        return String::new();
+    }
     let emitted_type = crate::naming::demodulize(controller_name);
     // Dedup by action — Rails' `root "articles#index"` and
     // `resources :articles` both target `ArticlesController#index`,
@@ -1791,16 +1795,11 @@ fn render_axum_handler_wrappers(
     let mut out = String::from("\n// ── rust2 wedge 2c.2: axum handler wrappers ──\n");
     out.push_str(
         "// Per-action free fns axum's Router can dispatch into. Build the\n\
-         // controller via Default, call the action, and translate the\n\
+         // controller via Default, enter process_action once, and translate the\n\
          // thread-local response state into an `axum::response::Response`.\n",
     );
     for r in routes {
         let action = r.action.as_str();
-        let method_name = if action == "new" {
-            "new_action"
-        } else {
-            action
-        };
         let path_params = &r.path_params;
         let has_body = matches!(
             r.method,
@@ -1901,12 +1900,9 @@ fn render_axum_handler_wrappers(
         if has_flash {
             body.push_str("    c.flash = crate::http::flash_from_request(&headers);\n");
         }
-        // The wrapper calls the action without `process_action`, so it
-        // sets `action_name` itself.
-        if sets_action_name {
-            body.push_str(&format!("    c.assign_action_name({action:?});\n"));
-        }
-        body.push_str(&format!("    c.{method_name}();\n"));
+        // The dispatcher assigns action_name (when needed), runs before-
+        // action callbacks, and dispatches the original Rails action name.
+        body.push_str(&format!("    c.process_action({action:?});\n"));
         // Translate the thread-local response, then sweep the flash the
         // action set (FLASH_OUT) onto a Set-Cookie — empty clears it, so
         // a shown notice doesn't stick. Field-independent, so every
@@ -2132,7 +2128,15 @@ fn render_route_helpers_bare_wrappers(lc: &crate::dialect::LibraryClass) -> Stri
                 let ty = sig_params
                     .iter()
                     .find(|sp| sp.name == p.name)
-                    .map(|sp| method::rust_param_ty(&sp.ty))
+                    .map(|sp| {
+                        if lc.name.0.as_str() == "RouteHelpers"
+                            && matches!(&sp.ty, crate::ty::Ty::Int)
+                        {
+                            "impl std::fmt::Display".to_string()
+                        } else {
+                            method::rust_param_ty(&sp.ty)
+                        }
+                    })
                     .unwrap_or_else(|| "i64".to_string());
                 format!("{}: {ty}", p.name.as_str())
             })
