@@ -43,13 +43,16 @@ module CgiIo
   }.freeze
 
   # Parse a CGI request from the given env hash + body-readable IO.
-  # Returns: { method:, path:, params:, cookies: }.
+  # Returns: { method:, path:, params:, body_params:, cookies:, accept: }.
+  # `body_params` holds the body's params alone (Rails'
+  # `request_parameters`), which ParamsWrapper copies from.
   def self.parse_request(env, stdin)
     method = (env["REQUEST_METHOD"] || "GET").upcase
     path   = env["PATH_INFO"] || "/"
     query  = env["QUERY_STRING"] || ""
 
     params = {}
+    body_params = {}
     parse_form_into(query, params) unless query.empty?
 
     raw_body = ""
@@ -58,14 +61,14 @@ module CgiIo
       ctype  = env["CONTENT_TYPE"] || ""
       raw_body = stdin.read(length).to_s if length > 0
       if length > 0 && ctype.start_with?("application/x-www-form-urlencoded")
-        parse_form_into(raw_body, params)
+        parse_form_into(raw_body, body_params)
       elsif length > 0 && ctype.start_with?("multipart/form-data")
         # File parts land in the params tree as UploadedFile objects
         # under their bracket-nested name, the way Rack nests them; see
         # runtime/multipart.rb.
         form = ActionDispatch::Http::Multipart.parse(raw_body, ctype)
-        form.fields.each { |k, v| assign_form_pair(params, k, v) }
-        form.files.each { |k, v| assign_form_pair(params, k, v) }
+        form.fields.each { |k, v| assign_form_pair(body_params, k, v) }
+        form.files.each { |k, v| assign_form_pair(body_params, k, v) }
       elsif length > 0 && ctype.start_with?("application/json")
         # `@rails/request.js` with `contentType: "application/json"`
         # (campfire's link unfurl): Rails parses the object into params,
@@ -73,11 +76,13 @@ module CgiIo
         # params as they are, and the action's `require` refuses it.
         begin
           parsed = JSON.parse(raw_body)
-          parsed.each { |k, v| params[k] = v } if parsed.is_a?(Hash)
+          parsed.each { |k, v| body_params[k] = v } if parsed.is_a?(Hash)
         rescue JSON::ParserError
           nil
         end
       end
+      # Merged `params` is body ∪ query (query already landed above).
+      body_params.each { |k, v| params[k] = v }
     end
 
     # Rails-style method override: a POST with hidden `_method=delete` (or
@@ -102,7 +107,7 @@ module CgiIo
     # same URL typed into the address bar.
     accept = env.fetch("HTTP_ACCEPT", "").to_s
 
-    { method: method, path: path, params: params, cookies: cookies, accept: accept, raw_body: raw_body }
+    { method: method, path: path, params: params, body_params: body_params, cookies: cookies, accept: accept, raw_body: raw_body }
   end
 
   # Write a CGI response to the given writable IO. `set_cookies` is

@@ -7,7 +7,7 @@
 
 use crate::expr::{Expr, ExprNode, LValue, Literal};
 
-use super::util::{arm_body_already_value, emit_case_pattern, indent, is_option_ty, peel_nil};
+use super::util::{arm_body_already_value, indent, is_option_ty, peel_nil, try_emit_case_pattern};
 use super::{
     current_return_is_option, current_return_is_unit, current_return_ty, emit_expr, emit_expr_tail,
     in_constructor, in_return_tail, mark_rebound_var, render_self_literal,
@@ -555,6 +555,20 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
     if let Some(rendered) = emit_regex_case(scrutinee, arms) {
         return rendered;
     }
+    // Only literal, binding and wildcard patterns have a Rust `match`
+    // form (`try_emit_case_pattern`). Other Ruby `===` patterns and
+    // guarded arms must remain explicit unsupported gaps.
+    if let Some(arm) = arms
+        .iter()
+        .find(|arm| arm.guard.is_some() || try_emit_case_pattern(&arm.pattern).is_none())
+    {
+        let span = match (&arm.guard, &arm.pattern) {
+            (Some(guard), _) => guard.span,
+            (None, crate::expr::Pattern::Expr { expr }) => expr.span,
+            _ => scrutinee.span,
+        };
+        return crate::emit::diagnostics::report_unsupported(span, "rust", "Case", "");
+    }
     let string_scrutinee = matches!(
         scrutinee.ty.as_ref(),
         Some(crate::ty::Ty::Str | crate::ty::Ty::Sym)
@@ -583,7 +597,8 @@ pub(super) fn emit_case(scrutinee: &Expr, arms: &[crate::expr::Arm]) -> String {
     let arm_strs: Vec<String> = arms
         .iter()
         .map(|arm| {
-            let pat_s = emit_case_pattern(&arm.pattern);
+            let pat_s = try_emit_case_pattern(&arm.pattern)
+                .expect("emit_case gated unsupported patterns above");
             // Emit via `emit_expr_tail` so Ivar reads see
             // `IN_RETURN_TAIL=true` and add `.clone()` for non-Copy
             // fields. Without that, `Value::from(self.body)` below

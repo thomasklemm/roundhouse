@@ -589,6 +589,7 @@ fn lower_controllers_for_spinel(app: &App, format_breadth: FormatBreadth) -> Vec
             inferred_params: Some(&app.inferred_method_params),
             models: &app.models,
             view_visible_controller_methods: None,
+            wrap_parameters_by_default: app.wrap_parameters_by_default,
         },
     )
 }

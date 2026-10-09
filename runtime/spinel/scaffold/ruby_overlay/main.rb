@@ -216,6 +216,8 @@ module Main
     # controller sees.
     env["RAW_POST_DATA"] = request.fetch(:raw_body, "")
     controller.request = ActionDispatch::Request.new(env.to_h, merged)
+    # The body's params alone, for ParamsWrapper (`Params.wrap`).
+    controller.request.request_parameters = request[:body_params]
     # Same object, module-reachable — helpers are module functions with
     # no controller context (see ActionController::Current).
     ActionController::Current.request = controller.request
