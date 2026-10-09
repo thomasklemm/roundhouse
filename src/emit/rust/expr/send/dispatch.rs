@@ -213,6 +213,29 @@ mod tests {
             });
         });
     }
+
+    #[test]
+    fn nil_predicate_preserves_optional_method_call_representation() {
+        let mut raw_value = Expr::new(
+            Span::synthetic(),
+            ExprNode::Send {
+                recv: Some(Expr::new(Span::synthetic(), ExprNode::SelfRef)),
+                method: Symbol::from("connected_at_raw"),
+                args: Vec::new(),
+                block: None,
+                parenthesized: true,
+            },
+        );
+        raw_value.ty = Some(crate::ty::Ty::Union {
+            variants: vec![crate::ty::Ty::Str, crate::ty::Ty::Nil],
+        });
+        crate::emit::rust::expr::with_emit_ctx(crate::emit::rust::EmitCtx::default(), || {
+            assert_eq!(
+                dispatch_method_by_recv_ty(&raw_value, "nil?", &[]).as_deref(),
+                Some("self.connected_at_raw().is_none()")
+            );
+        });
+    }
 }
 
 /// Per-method param-Ty fallback for the per-controller AC::Base shim
@@ -399,6 +422,12 @@ pub(super) fn dispatch_method_by_recv_ty(
     // `nil?` to `false`, which is wrong for that actual binding.
     // Prefer the declared Rust parameter representation for this
     // predicate, just as the unwrap path below does for ordinary calls.
+    if method == "nil?"
+        && args.is_empty()
+        && recv.ty.as_ref().is_some_and(super::super::util::is_option_ty)
+    {
+        return Some(format!("{raw_recv_s}.is_none()"));
+    }
     if method == "nil?"
         && args.is_empty()
         && let Some(name) = var_name
