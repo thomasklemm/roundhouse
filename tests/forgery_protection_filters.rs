@@ -111,7 +111,7 @@ fn the_concern_macro_runs_after_sign_in_under_its_guard_and_halts() {
     // `bot_key?` it is a NoMethodError on every request, which is what
     // the CRuby lane served before the inquirer fact reached controllers.
     assert!(
-        tail.contains(r#"verify_authenticity_token if !(authenticated_by == "bot_key")"#),
+        tail.contains(r#"verify_authenticity_token if !(self.authenticated_by == "bot_key")"#),
         "the `unless:` guard is kept and folded:\n{rooms}"
     );
     assert!(tail.contains("performed?"), "a refused request halts the chain:\n{rooms}");
@@ -146,6 +146,30 @@ fn symbol_guards_emit_as_controller_instance_calls_in_rust() {
         .map(|(_, content)| content)
         .expect("Rust controller emitted");
     assert!(controller.contains("self.safe_request_pred()"), "{controller}");
+    assert!(controller.contains("self.authenticated_by()"), "{controller}");
+}
+
+#[test]
+fn forgery_lambda_helper_reads_dispatch_through_the_inherited_controller() {
+    let rust = emit_rust(vec![
+        (
+            "app/controllers/application_controller.rb",
+            "class ApplicationController < ActionController::Base\n  protect_from_forgery with: :exception, unless: -> { authenticated_by }\n\n  private\n    def authenticated_by\n      @authenticated_by\n    end\nend\n",
+        ),
+        (
+            "app/controllers/rooms_controller.rb",
+            "class RoomsController < ApplicationController\n  def index\n  end\nend\n",
+        ),
+        (
+            "config/routes.rb",
+            "Rails.application.routes.draw do\n  resources :rooms, only: [:index]\nend\n",
+        ),
+    ]);
+    let controller = rust
+        .iter()
+        .find(|(path, _)| path.ends_with("rooms_controller.rs"))
+        .map(|(_, content)| content)
+        .expect("Rust child controller emitted");
     assert!(controller.contains("self.authenticated_by()"), "{controller}");
 }
 

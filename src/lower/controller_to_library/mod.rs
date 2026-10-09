@@ -1647,6 +1647,13 @@ fn build_filter_preamble(
     own_privs_inlined: bool,
 ) -> (Vec<PreambleStmt>, process_action::WrapFilters) {
     let chain = ancestor_chain(controller, all_controllers);
+    // Filter lambdas execute inside the synthesized dispatcher rather
+    // than in the helper method that declared them. Keep known controller
+    // instance-helper reads bound to that dispatcher's live receiver.
+    let filter_helpers: std::collections::HashSet<Symbol> = std::iter::once(controller)
+        .chain(chain.iter().copied())
+        .flat_map(|c| c.actions().map(|action| action.name.clone()))
+        .collect();
 
     // Skips, kept whole rather than reduced to a set of names: a skip
     // carries `only:`/`except:` of its own, and campfire's
@@ -1713,6 +1720,15 @@ fn build_filter_preamble(
     };
     let push_call = |f: &Filter, preamble: &mut Vec<PreambleStmt>| {
         let Some(f) = narrow(f) else { return };
+        let mut f = f;
+        f.if_cond_expr = f
+            .if_cond_expr
+            .as_ref()
+            .map(|expr| rewrites::rewrite_filter_helper_reads(expr, &filter_helpers));
+        f.unless_cond_expr = f
+            .unless_cond_expr
+            .as_ref()
+            .map(|expr| rewrites::rewrite_filter_helper_reads(expr, &filter_helpers));
         let f = &f;
         let Some(target) = find_target(&f.target) else {
             // The one framework-defined target the chain carries: the
@@ -1834,15 +1850,24 @@ fn build_filter_preamble(
                     };
                     let is_after = target.is_after();
                     let is_prepend = target.is_prepend();
-                    let halt_check = can_respond(&target.body);
+                    let body = rewrites::rewrite_filter_helper_reads(&target.body, &filter_helpers);
+                    let if_cond_expr = target
+                        .if_cond_expr
+                        .as_ref()
+                        .map(|expr| rewrites::rewrite_filter_helper_reads(expr, &filter_helpers));
+                    let unless_cond_expr = target
+                        .unless_cond_expr
+                        .as_ref()
+                        .map(|expr| rewrites::rewrite_filter_helper_reads(expr, &filter_helpers));
+                    let halt_check = can_respond(&body);
                     let stmt = PreambleStmt::Block {
-                        body: target.body,
+                        body,
                         only: target.only,
                         except: target.except,
                         if_cond: target.if_cond,
                         unless_cond: target.unless_cond,
-                        if_cond_expr: target.if_cond_expr,
-                        unless_cond_expr: target.unless_cond_expr,
+                        if_cond_expr,
+                        unless_cond_expr,
                         halt_check,
                     };
                     if is_after {

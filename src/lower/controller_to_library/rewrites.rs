@@ -133,6 +133,25 @@ fn controller_helper_call(name: &str, span: Span) -> Expr {
     )
 }
 
+/// Make known zero-argument controller helper reads explicit in filter
+/// lambdas. These expressions are moved into `process_action`, where a
+/// receiverless send is emitted as a free function rather than a call on
+/// the live controller. Restrict the rewrite to names resolved in the
+/// controller ancestry; unrelated Ruby calls retain their original shape.
+pub(super) fn rewrite_filter_helper_reads(
+    expr: &Expr,
+    helpers: &std::collections::HashSet<Symbol>,
+) -> Expr {
+    map_expr(expr, &|e| match &*e.node {
+        ExprNode::Send { recv: None, method, args, block: None, .. }
+            if args.is_empty() && helpers.contains(method) =>
+        {
+            Some(controller_helper_call(method.as_str(), e.span))
+        }
+        _ => None,
+    })
+}
+
 /// Lower controller render calls to view invocations or typed inline responses.
 pub(super) fn rewrite_render_to_views(
     expr: &Expr,
