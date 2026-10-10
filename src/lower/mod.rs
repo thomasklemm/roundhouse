@@ -48,6 +48,7 @@ pub mod create_block;
 pub mod as_json_poro;
 pub mod active_model_model;
 pub mod enumerable_ext;
+mod index_with;
 mod fused;
 pub mod time_calendar;
 pub mod boolean_cast;

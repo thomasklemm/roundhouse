@@ -5235,6 +5235,7 @@ fn spinel_files(app: &App, fixture: &Path) -> Result<(Vec<(String, String)>, Vec
         "active_support_number_helper_mixin",
         "action_view_number_helper",
         "action_view_number_helper_mixin",
+        "active_support_enumerable_ext",
         "active_support_ext",
         "hash_deep_merge",
         "security_utils",

@@ -65,6 +65,7 @@ require_relative "runtime/importmap"
 require_relative "runtime/active_support_duration"
 # Blank-predicate helper for receivers `src/lower/blank.rs` had no static
 # type to ground on. Before anything that can hold a `present?` site.
+require_relative "runtime/active_support_enumerable_ext"
 require_relative "runtime/active_support_ext"
 require_relative "runtime/rails"
 # `ActiveSupport::Cache::MemoryStore` (a `Rails::Cache`) and

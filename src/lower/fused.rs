@@ -439,6 +439,7 @@ fn rewrite_hook_node(
     skip_full_messages: bool,
 ) {
     super::pathname_ctor::rewrite_node(e);
+    super::index_with::rewrite_node(e);
     super::array_ordinal::rewrite_node(e);
     super::save_without_validation::rewrite_node(e);
     super::random_formatter::rewrite_node(e);
@@ -488,6 +489,7 @@ fn rewrite_view_node(
     skip_full_messages: bool,
 ) {
     super::pathname_ctor::rewrite_node(e);
+    super::index_with::rewrite_node(e);
     super::array_ordinal::rewrite_node(e);
     super::random_formatter::rewrite_node(e);
     super::number_to_fs::rewrite_node(e);
@@ -523,6 +525,7 @@ fn rewrite_view_node(
 
 fn rewrite_test_node(e: &mut Expr, skip_full_messages: bool) {
     super::save_without_validation::rewrite_node(e);
+    super::index_with::rewrite_node(e);
     super::bigdecimal::rewrite_node(e);
     super::range_enumerable::rewrite_node(e);
     super::enumerable_ext::rewrite_node(e);

@@ -132,6 +132,7 @@ begin
   require "time"
   require "spinel/scaffold/ruby_overlay/runtime/active_support_time_parsing"
   # Not left to the emitted boot: the readers above present through its `ActiveSupport.present`.
+  require "active_support_enumerable_ext"
   require "active_support_ext"
 rescue LoadError
   # sqlite3 gem absent OR spinel/ subtree not on load path. base_test

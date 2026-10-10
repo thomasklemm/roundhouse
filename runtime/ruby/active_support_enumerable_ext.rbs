@@ -1,0 +1,3 @@
+module ActiveSupport
+  def self.index_with: (untyped list) { (untyped item) -> untyped } -> Hash[untyped, untyped]
+end
