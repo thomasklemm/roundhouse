@@ -166,6 +166,9 @@ end
 
 class TestBase
   def initialize: () -> void
+  # Rails' default: each example runs inside a non-joinable transaction.
+  # A class sets this false when it has to see a real COMMIT.
+  def self.use_transactional_tests: () -> bool
   def setup: () -> void
   def teardown: () -> void
   def file_fixture: (String name) -> Pathname

@@ -130,7 +130,10 @@ module ActiveRecord
     def _save_committed: (bool was_new) -> void
     def _destroy_committed: () -> void
     def _run_commit_callbacks: (Integer kind) -> nil
+    def self._txn_parent_joinable?: (Integer depth) -> bool
+    def self._txn_note_joinable: (Integer depth, bool joinable) -> nil
     def self._commit_enlisted: () -> nil
+    def self._commit_enlisted_from: (Integer from) -> nil
     def self._rollback_enlisted: (Integer from) -> nil
     def _restore_after_rollback: (Integer kind) -> nil
     # Ruby-family overrides of base.rb's dirty-tracking stubs.

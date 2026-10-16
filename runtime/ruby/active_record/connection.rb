@@ -533,11 +533,22 @@ module ActiveRecord
     #
     # `isolation:`, `requires_new:`, and `joinable:` are Rails'
     # `DatabaseStatements#transaction` keyword options (the same three
-    # `with_lock` forwards — see base.rb). `isolation:` and `joinable:`
-    # are accepted and ignored (no isolation levels). A nested
-    # `requires_new: true` runs inside a SAVEPOINT, as Rails' does: an
-    # exception or `ActiveRecord::Rollback` from it undoes only its own
-    # writes, and the outer transaction carries on.
+    # `with_lock` forwards — see base.rb). `isolation:` is accepted and
+    # ignored (no isolation levels). A nested `requires_new: true` runs
+    # inside a SAVEPOINT, as Rails' does: an exception or
+    # `ActiveRecord::Rollback` from it undoes only its own writes, and
+    # the outer transaction carries on.
+    #
+    # `joinable: false` is Rails' fixture transaction (and
+    # `pin_connection!`): a nested `transaction` cannot join it, so it
+    # opens a SAVEPOINT even without `requires_new:`. Commit callbacks
+    # for the writes inside that savepoint run when the savepoint
+    # releases, because the parent is not joinable — the same rule as
+    # Rails' `run_commit_callbacks = !current_transaction.joinable?`.
+    # A `requires_new:` savepoint under a joinable parent still defers
+    # callbacks to the parent. The test shim opens one non-joinable
+    # transaction around each example unless the class sets
+    # `use_transactional_tests` false.
     #
     # The depth reset on an exception is explicit, in the `rescue`
     # itself, rather than left to the `ensure` below: Spinel
@@ -576,19 +587,56 @@ module ActiveRecord
     #
     # The outermost transaction's edges are reported to
     # `TransactionHooks` (above). A nested block reports nothing.
+    #
+    # Bit `depth - 1` of `Db._txn_joinable_bits` records whether the
+    # frame at that depth can be joined. A joined call copies its
+    # parent's bit onto the new depth so the next nested call still
+    # sees the real frame.
+    def self._txn_parent_joinable?(depth)
+      return false if depth <= 0
+      bit = 1 << (depth - 1)
+      (Db._txn_joinable_bits & bit) != 0
+    end
+
+    def self._txn_note_joinable(depth, joinable)
+      bit = 1 << (depth - 1)
+      bits = Db._txn_joinable_bits
+      if joinable
+        Db._txn_joinable_bits = bits | bit
+      else
+        Db._txn_joinable_bits = bits - (bits & bit)
+      end
+      nil
+    end
+
     def self.transaction(isolation: nil, requires_new: nil, joinable: true)
       depth = Db._txn_depth
       if depth > 0
-        savepoint = requires_new ? "rh_savepoint_#{depth}" : nil
+        parent_joinable = ActiveRecord::Base._txn_parent_joinable?(depth)
+        wants_new = requires_new ? true : false
+        open_savepoint = wants_new || !parent_joinable
+        savepoint = open_savepoint ? "rh_savepoint_#{depth}" : nil
+        # Callbacks run at this savepoint only when the parent cannot
+        # be joined. A requires_new savepoint under a joinable parent
+        # keeps them enlisted for that parent.
+        run_callbacks = open_savepoint && !parent_joinable
         Db.exec("SAVEPOINT #{savepoint}") unless savepoint.nil?
         # The writes a ROLLBACK TO this savepoint undoes are the ones
         # enlisted after this mark.
         mark = Db._txn_records.length
-        Db._txn_depth = depth + 1
+        new_depth = depth + 1
+        Db._txn_depth = new_depth
+        if open_savepoint
+          ActiveRecord::Base._txn_note_joinable(new_depth, joinable)
+        else
+          ActiveRecord::Base._txn_note_joinable(new_depth, parent_joinable)
+        end
+        finished = false
         begin
           begin
             result = yield
             Db.exec("RELEASE SAVEPOINT #{savepoint}") unless savepoint.nil?
+            finished = true
             result
           rescue ActiveRecord::Rollback
             # Swallowed by the joined block that saw it, as in Rails: the
@@ -621,6 +669,12 @@ module ActiveRecord
           end
         ensure
           Db._txn_depth = depth
+          # After the frame is popped, so a callback's own save sees
+          # the parent. Spinel skips this ensure when the rescue
+          # re-raises; `finished` is false on that path anyway.
+          if finished && run_callbacks
+            ActiveRecord::Base._commit_enlisted_from(mark)
+          end
         end
       elsif Db.transaction_open?
         # A transaction opened BELOW ActiveRecord (a raw `BEGIN`, or
@@ -638,6 +692,7 @@ module ActiveRecord
         Db.exec("BEGIN")
         ActiveRecord::TransactionHooks.began
         Db._txn_depth = 1
+        ActiveRecord::Base._txn_note_joinable(1, joinable)
         rolled_back = false
         begin
           begin
@@ -1173,10 +1228,18 @@ module ActiveRecord
     # transaction wrote more than once. A create stays a create through
     # later updates; a destroyed record reports the destroy.
     def self._commit_enlisted
+      _commit_enlisted_from(0)
+    end
+
+    # Run commit callbacks for the writes enlisted at and after `from`,
+    # and drop them from the list. Writes enlisted earlier stay for the
+    # parent transaction. Called for the outermost COMMIT (`from` 0)
+    # and for a savepoint whose parent is not joinable.
+    def self._commit_enlisted_from(from)
       records = Db._txn_records
-      return nil if records.empty?
-      held = records.dup
-      records.clear
+      return nil if records.length <= from
+      held = records[from, records.length - from]
+      records.pop while records.length > from
       seen = []
       held.each do |entry|
         record = entry.record

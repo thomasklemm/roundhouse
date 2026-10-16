@@ -400,7 +400,16 @@ fn untyped_subexpressions_baseline() {
     // all read the enlisted list through `Db._txn_records` (or the
     // owner slot) — unmodeled `Db` here, as the depth counter's reads
     // above are; the RBS-paired gate types them all.
-    const CEILING: usize = 757;
+    // Non-joinable fixture transactions (savepoints under
+    // `use_transactional_tests`): 757 -> 787, MEASURED by swapping
+    // connection.rb against this branch's base. The net thirty are
+    // `_txn_parent_joinable?` (6), `_txn_note_joinable` (11), six more
+    // in `transaction` (the parent-joinable read and the savepoint
+    // name/flag), and `_commit_enlisted` moving into
+    // `_commit_enlisted_from` (37 -> 44, the extra `from` reads). Same
+    // unmodeled `Db` accessors as the depth counter; the RBS-paired
+    // gate types them.
+    const CEILING: usize = 787;
     assert!(
         existing_untyped <= CEILING && like_untyped <= LIKE_CEILING,
         "{} untyped sub-expressions on spinel-blog runtime — exceeds ledger: \

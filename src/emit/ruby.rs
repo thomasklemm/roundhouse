@@ -1437,10 +1437,31 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
         "\n# Spinel AOT autorun shim — see emit/ruby.rs::render_autorun_shim.\n",
     );
     // An Integer counter and per-failure `puts`, deliberately: no
-    // array accumulator and no block, so the shim leans on nothing
-    // beyond `begin/rescue`, `+`, `to_s` and string concatenation —
-    // the surface spinel-AOT already compiles in lowered test bodies
-    // (`assert_raises`) and `runtime/spinel`.
+    // array accumulator and no block in the runner, so that loop leans
+    // on nothing beyond `begin/rescue`, `+`, `to_s` and string
+    // concatenation. The fixture-transaction wrapper is a method: its
+    // block sits in a `def`, the shape spinel already compiles in
+    // lowered test bodies.
+    //
+    // Rails' `use_transactional_tests` (default true) runs the example
+    // inside a non-joinable transaction, so each `save`/`destroy` is a
+    // SAVEPOINT. `TestBase.use_transactional_tests` is that default; a
+    // class that sets the flag false overrides the class method.
+    if !test_methods.is_empty() {
+        writeln!(s, "class {class_name}").unwrap();
+        for tm in &test_methods {
+            writeln!(s, "  def __txn_{tm}").unwrap();
+            writeln!(s, "    if self.class.use_transactional_tests").unwrap();
+            writeln!(s, "      ActiveRecord::Base.transaction(joinable: false) do").unwrap();
+            writeln!(s, "        {tm}").unwrap();
+            writeln!(s, "      end").unwrap();
+            writeln!(s, "    else").unwrap();
+            writeln!(s, "      {tm}").unwrap();
+            writeln!(s, "    end").unwrap();
+            writeln!(s, "  end").unwrap();
+        }
+        writeln!(s, "end").unwrap();
+    }
     writeln!(s, "__failed = 0").unwrap();
     writeln!(s, "__skipped = 0").unwrap();
     for tm in &test_methods {
@@ -1466,7 +1487,7 @@ fn render_autorun_shim(lc: &LibraryClass, reset_lines: &[String]) -> String {
             writeln!(s, "  end").unwrap();
         }
         writeln!(s, "  __t.setup").unwrap();
-        writeln!(s, "  __t.{tm}").unwrap();
+        writeln!(s, "  __t.__txn_{tm}").unwrap();
         // `rescue Exception`, not a bare rescue: a bare one catches
         // StandardError, and an assertion library may deliberately put
         // its failure OUTSIDE that. `Mocha::ExpectationError <
