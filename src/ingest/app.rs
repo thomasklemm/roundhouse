@@ -9109,7 +9109,10 @@ pub(super) fn content_security_policy_method(source: &str) -> Option<String> {
                     "unsafe_eval" => "'unsafe-eval'".to_string(),
                     "https" => "https:".to_string(),
                     "http" => "http:".to_string(),
-                    other => other.to_string(),
+                    // An unknown symbol is not a source we can quote.
+                    // Dropping it keeps the directive honest; inventing
+                    // the bare word would ship a policy the app did not write.
+                    _ => continue,
                 }
             } else if arg.len() >= 2
                 && ((arg.starts_with('"') && arg.ends_with('"'))
@@ -9142,24 +9145,31 @@ pub(super) fn content_security_policy_method(source: &str) -> Option<String> {
     Some(body)
 }
 
-/// `{"imports":{…}}` for `Rails.application.importmap_json`. Pin paths
-/// are already `/assets/…` from importmap ingest.
+/// Pretty `{"imports":{…}}` for `Rails.application.importmap_json`.
+///
+/// The bytes are the script body `javascript_importmap_tags` embeds
+/// (`action_view/view_helpers.rb`: 2-space indent, one pin per line,
+/// `": "` between name and path). Campfire hashes that body into
+/// `script-src`. A compact encoding is a different hash, and the
+/// browser then blocks the page's own import map. Pin paths are
+/// already `/assets/…` from importmap ingest, in the same order
+/// `Importmap.pins` emits.
 pub(super) fn importmap_json_method(pins: &[crate::app::ImportmapPin]) -> Option<String> {
     if pins.is_empty() {
         return None;
     }
-    let mut json = String::from("{\"imports\":{");
+    let mut json = String::from("{\n  \"imports\": {\n");
     for (i, pin) in pins.iter().enumerate() {
         if i > 0 {
-            json.push(',');
+            json.push_str(",\n");
         }
-        json.push('"');
+        json.push_str("    \"");
         json.push_str(&json_escape(&pin.name));
-        json.push_str("\":\"");
+        json.push_str("\": \"");
         json.push_str(&json_escape(&pin.path));
         json.push('"');
     }
-    json.push_str("}}");
+    json.push_str("\n  }\n}");
     Some(format!("def importmap_json\n  {json:?}\nend\n"))
 }
 
@@ -10676,5 +10686,28 @@ mod locale_tests {
         assert_eq!(locale_literal("\"fr#CA\" # comment").as_deref(), Some("fr#CA"));
         assert_eq!(locale_literal("'ja'").as_deref(), Some("ja"));
         assert_eq!(locale_literal("ENV[\"LOCALE\"]"), None);
+    }
+}
+
+#[cfg(test)]
+mod importmap_json_tests {
+    use super::importmap_json_method;
+    use crate::app::ImportmapPin;
+
+    #[test]
+    fn importmap_json_is_the_pretty_script_body() {
+        let pins = vec![
+            ImportmapPin { name: "application".into(), path: "/assets/application.js".into() },
+            ImportmapPin {
+                name: "@hotwired/turbo-rails".into(),
+                path: "/assets/turbo.js".into(),
+            },
+        ];
+        let method = importmap_json_method(&pins).expect("pins");
+        let json = "{\n  \"imports\": {\n    \"application\": \"/assets/application.js\",\n    \"@hotwired/turbo-rails\": \"/assets/turbo.js\"\n  }\n}";
+        assert!(
+            method.contains(&format!("{json:?}")),
+            "CSP hashes this string; it has to be the importmap script body:\n{method}"
+        );
     }
 }

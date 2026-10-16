@@ -686,12 +686,16 @@ module Rails
     end
 
     # `Rails.application.importmap`. Paths are already `/assets/…`
-    # from ingest; `to_json` ignores the resolver.
+    # from ingest; `to_json` ignores the resolver. The string is the
+    # pretty script body the layout embeds, because a CSP hash of a
+    # compact encoding does not match the page.
     def importmap
       ImportmapMap.new
     end
 
     # Override on the app reopen when `config/importmap.rb` has pins.
+    # That override is the pretty script body. This default is only
+    # the empty map an app with no pins would hash, and no page embeds it.
     def importmap_json
       "{\"imports\":{}}"
     end
