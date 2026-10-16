@@ -7137,8 +7137,15 @@ fn apply_test_gem_wiring(files: &mut Vec<(String, String)>) {
             // otherwise inherit WebMock's, and once a test disables
             // WebMock to reach a real server its `start` breaks.
             const BOOT: &str = "require_relative \"../boot\"\n";
+            // ruby-vips loads the system libxml. Nokogiri's packaged
+            // libxml (the one with the wildcard-namespace patch that
+            // `*:a` and `css-class()` need) is loaded when boot
+            // requires nokogiri. A `require "vips"` above that line
+            // binds the process to libxml 2.9 and every HTML5 CSS
+            // wildcard raises `Invalid expression`.
+            let after_boot = *gem == "webmock" || *gem == "ruby-vips";
             match helper.find(BOOT) {
-                Some(at) if *gem == "webmock" => helper.insert_str(at + BOOT.len(), &format!("{line}\n")),
+                Some(at) if after_boot => helper.insert_str(at + BOOT.len(), &format!("{line}\n")),
                 _ => insert_require_line(helper, &line),
             }
         }
@@ -9983,6 +9990,35 @@ mod tests {
         apply_test_gem_wiring(&mut files);
         let gemfile = &files.iter().find(|(p, _)| p == "Gemfile").unwrap().1;
         assert!(gemfile.contains("webmock"), "a test body's demand stands:\n{gemfile}");
+    }
+
+    /// `require "vips"` after boot. ruby-vips pulls in the system
+    /// libxml; Nokogiri has to load its packaged one first or `*:a`
+    /// and `css-class()` raise `Invalid expression`.
+    #[test]
+    fn vips_require_follows_boot() {
+        let mut files = vec![
+            (
+                "test/test_helper.rb".to_string(),
+                "require_relative \"../boot\"\n".to_string(),
+            ),
+            (
+                "test/models/avatar_test.rb".to_string(),
+                "class AvatarTest < TestBase\n  def test_pixels\n    Vips::Image.new_from_buffer(body, \"\")\n  end\nend\n"
+                    .to_string(),
+            ),
+            ("Gemfile".to_string(), "source \"https://rubygems.org\"\n".to_string()),
+        ];
+        apply_test_gem_wiring(&mut files);
+        let helper = &files.iter().find(|(p, _)| p == "test/test_helper.rb").unwrap().1;
+        let boot = helper.find("require_relative \"../boot\"\n").expect("boot");
+        let vips = helper.find("require \"vips\"\n").expect("vips require");
+        assert!(
+            boot < vips,
+            "vips must load after boot so Nokogiri's libxml wins:\n{helper}"
+        );
+        let gemfile = &files.iter().find(|(p, _)| p == "Gemfile").unwrap().1;
+        assert!(gemfile.contains("ruby-vips"), "{gemfile}");
     }
 
     #[test]
