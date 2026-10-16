@@ -60,6 +60,30 @@ module ActionController
     given.length > 0 && given == expected
   end
 
+  # `ApplicationController.config.relative_url_root`. One object for
+  # the process: `Rails.application` is not the controller, and a
+  # test assigns the class reader then an instance reads it back.
+  class ControllerConfig
+    def initialize
+      @relative_url_root = +""
+    end
+
+    def relative_url_root
+      @relative_url_root
+    end
+
+    def relative_url_root=(value)
+      @relative_url_root = value
+      @relative_url_root
+    end
+  end
+
+  CONTROLLER_CONFIG_SLOT = [ControllerConfig.new]
+
+  def self.controller_config
+    CONTROLLER_CONFIG_SLOT[0]
+  end
+
   # WHATWG URL-parser preprocessing: drop tab/CR/LF/NUL anywhere, then
   # strip leading and trailing C0 controls and spaces. A tab in the
   # middle (`/\t/evil`) becomes `//evil` so host classification sees it.
@@ -1045,6 +1069,21 @@ module ActionController
 
     def headers
       @headers
+    end
+
+    # `config.relative_url_root` inside a controller instance. The
+    # class reader is the same object (`controller_config.rb`); the
+    # typed-runtime gate keys signatures by method name, so the two
+    # `config` methods cannot share this file.
+    def config
+      ActionController.controller_config
+    end
+
+    # `importmap.to_json(resolver: helpers)`. The map's paths are
+    # already resolved at ingest, so the resolver is accepted and
+    # unused. `self` is enough for the call to evaluate.
+    def helpers
+      self
     end
 
     # `send_data data, type:, disposition:` — a binary response body

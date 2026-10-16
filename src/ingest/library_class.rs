@@ -3888,7 +3888,9 @@ pub fn ingest_concern_filters(
                     // survey mode records the gap and keeps scanning.
                     Err(err) => super::survey::continue_or_fail(err)?,
                     Ok(None) => {
-                        if let Some(f) = block_form_concern_filter(&inner, file) {
+                        if let Some(f) = content_security_policy_filter(&inner, file) {
+                            filters.push(f);
+                        } else if let Some(f) = block_form_concern_filter(&inner, file) {
                             filters.push(f);
                         } else if let Some(name) = forgery_macro_name(&inner) {
                             // A forgery declaration `parse_filter_call` does not
@@ -3927,6 +3929,98 @@ fn forgery_macro_name(stmt: &ruby_prism::Node<'_>) -> Option<&'static str> {
         "skip_forgery_protection" => Some("skip_forgery_protection"),
         _ => None,
     }
+}
+
+/// `content_security_policy if: -> { … } do |policy| … end` inside
+/// `included do`. Rails registers that as a before_action which
+/// `instance_exec`s the block with the request policy. The lowering
+/// inlines a before_action body, so this rewrites the call into that
+/// shape and replaces the `|policy|` parameter with
+/// `request.content_security_policy` (memoized, so the header writer
+/// sees the same object).
+fn content_security_policy_filter(
+    stmt: &ruby_prism::Node<'_>,
+    file: &str,
+) -> Option<crate::dialect::Filter> {
+    use crate::dialect::{Filter, FilterKind};
+    let call = stmt.as_call_node()?;
+    if call.receiver().is_some()
+        || call.block().is_none()
+        || constant_id_str(&call.name()) != "content_security_policy"
+    {
+        return None;
+    }
+    let mut expr = ingest_expr(stmt, file).ok()?;
+    if !rewrite_csp_call_to_before_action(&mut expr) {
+        return None;
+    }
+    Some(Filter {
+        target_span: crate::span::Span::synthetic(),
+        kind: FilterKind::Before,
+        target: crate::ident::Symbol::from("__block__"),
+        from_concern: None,
+        only: Vec::new(),
+        except: Vec::new(),
+        only_style: crate::expr::ArrayStyle::default(),
+        except_style: crate::expr::ArrayStyle::default(),
+        if_cond: None,
+        unless_cond: None,
+        if_cond_expr: None,
+        unless_cond_expr: None,
+        block: Some(expr),
+        prepend: false,
+    })
+}
+
+fn rewrite_csp_call_to_before_action(expr: &mut crate::expr::Expr) -> bool {
+    use crate::expr::ExprNode;
+    let ExprNode::Send { method, block, .. } = &mut *expr.node else {
+        return false;
+    };
+    if method.as_str() != "content_security_policy" {
+        return false;
+    }
+    *method = crate::ident::Symbol::from("before_action");
+    let Some(block) = block else { return false };
+    let ExprNode::Lambda { body, .. } = &mut *block.node else { return false };
+    replace_policy_param(body);
+    true
+}
+
+fn replace_policy_param(expr: &mut crate::expr::Expr) {
+    use crate::expr::ExprNode;
+    if let ExprNode::Var { name, .. } = &*expr.node {
+        if name.as_str() == "policy" {
+            let span = expr.span;
+            *expr = request_content_security_policy(span);
+            return;
+        }
+    }
+    expr.node.for_each_child_mut(&mut |child| replace_policy_param(child));
+}
+
+fn request_content_security_policy(span: crate::span::Span) -> crate::expr::Expr {
+    use crate::expr::{Expr, ExprNode};
+    let request = Expr::new(
+        span,
+        ExprNode::Send {
+            recv: None,
+            method: crate::ident::Symbol::from("request"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    );
+    Expr::new(
+        span,
+        ExprNode::Send {
+            recv: Some(request),
+            method: crate::ident::Symbol::from("content_security_policy"),
+            args: Vec::new(),
+            block: None,
+            parenthesized: false,
+        },
+    )
 }
 
 /// A block-form filter in a concern's `included do` — campfire's

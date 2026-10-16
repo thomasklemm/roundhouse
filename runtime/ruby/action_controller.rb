@@ -1,5 +1,9 @@
 # frozen_string_literal: true
 require_relative "action_controller/base"
+# Class-side `config`, the same object `Base#config` returns. A
+# separate file because the typed-runtime gate cannot hold two
+# methods named `config` in one signature table.
+require_relative "action_controller/controller_config"
 # `ActionController::API`, the base an API app's ApplicationController
 # names: Base under the API name.
 require_relative "action_controller/api"

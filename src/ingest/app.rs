@@ -949,6 +949,18 @@ pub fn ingest_app_with_vfs<V: Vfs + ?Sized>(vfs: &V, dir: &Path) -> IngestResult
                 }
             }
         }
+        // `config.content_security_policy do |policy| … end`. The
+        // request copies this per call; nil (the runtime default) when
+        // the initializer is absent or DISABLE_CONTENT_SECURITY_POLICY
+        // is set. Sources are quoted here (`:self` → "'self'") because
+        // the runtime setter stores the list it is given.
+        if let Ok(init) = vfs.read(&dir.join("config/initializers/content_security_policy.rb")) {
+            if let Some(method) = content_security_policy_method(&String::from_utf8_lossy(&init)) {
+                if let Ok(mut synth) = crate::runtime_src::parse_methods(&method) {
+                    methods.append(&mut synth);
+                }
+            }
+        }
         // The forgery check's verification strategy (Rails main's
         // Fetch Metadata rule; see `read_forgery_verification_strategy`).
         // Only a non-default answer is synthesized; the runtime default
@@ -1788,6 +1800,13 @@ end
                 &importmap_path.display().to_string(),
             ))? {
                 if !importmap.pins.is_empty() {
+                    if let Some(method) = importmap_json_method(&importmap.pins) {
+                        if let Some(rails_app) = app.rails_application.as_mut() {
+                            if let Ok(mut synth) = crate::runtime_src::parse_methods(&method) {
+                                rails_app.methods.append(&mut synth);
+                            }
+                        }
+                    }
                     app.importmap = Some(importmap);
                 }
             }
@@ -9053,6 +9072,109 @@ fn extract_app_namespace(source: &[u8]) -> Option<String> {
         }
     }
     None
+}
+
+/// `config.content_security_policy do |policy| policy.script_src :self end`,
+/// including the `unless ENV["DISABLE_CONTENT_SECURITY_POLICY"]` guard
+/// when the file has one. `None` when the block names no literal source.
+pub(super) fn content_security_policy_method(source: &str) -> Option<String> {
+    let start = source.find("content_security_policy")?;
+    let mut directives: Vec<(String, Vec<String>)> = Vec::new();
+    for line in source[start..].lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("end") {
+            break;
+        }
+        let Some(rest) = line.strip_prefix("policy.") else { continue };
+        let name_end = rest.find(|c: char| !c.is_ascii_alphanumeric() && c != '_').unwrap_or(rest.len());
+        let name = &rest[..name_end];
+        if name.is_empty() {
+            continue;
+        }
+        let args = rest[name_end..].trim().trim_end_matches(')');
+        let mut sources = Vec::new();
+        for arg in args.split(',') {
+            let arg = arg.trim().trim_end_matches(',');
+            if arg.is_empty() {
+                continue;
+            }
+            let quoted = if let Some(sym) = arg.strip_prefix(':') {
+                match sym {
+                    "self" => "'self'".to_string(),
+                    "none" => "'none'".to_string(),
+                    "unsafe_inline" => "'unsafe-inline'".to_string(),
+                    "unsafe_eval" => "'unsafe-eval'".to_string(),
+                    "https" => "https:".to_string(),
+                    "http" => "http:".to_string(),
+                    other => other.to_string(),
+                }
+            } else if arg.len() >= 2
+                && ((arg.starts_with('"') && arg.ends_with('"'))
+                    || (arg.starts_with('\'') && arg.ends_with('\'')))
+            {
+                arg[1..arg.len() - 1].to_string()
+            } else {
+                continue;
+            };
+            sources.push(quoted);
+        }
+        if !sources.is_empty() {
+            directives.push((name.replace('_', "-"), sources));
+        }
+    }
+    if directives.is_empty() {
+        return None;
+    }
+    let guarded = source.contains("DISABLE_CONTENT_SECURITY_POLICY");
+    let mut body = String::from("def content_security_policy\n");
+    if guarded {
+        body.push_str("  return nil if ENV[\"DISABLE_CONTENT_SECURITY_POLICY\"] == \"true\"\n");
+    }
+    body.push_str("  policy = ActionDispatch::ContentSecurityPolicy.new\n");
+    for (name, sources) in directives {
+        let list = sources.iter().map(|s| format!("{s:?}")).collect::<Vec<_>>().join(", ");
+        body.push_str(&format!("  policy.set_directive({name:?}, [{list}])\n"));
+    }
+    body.push_str("  policy\nend\n");
+    Some(body)
+}
+
+/// `{"imports":{…}}` for `Rails.application.importmap_json`. Pin paths
+/// are already `/assets/…` from importmap ingest.
+pub(super) fn importmap_json_method(pins: &[crate::app::ImportmapPin]) -> Option<String> {
+    if pins.is_empty() {
+        return None;
+    }
+    let mut json = String::from("{\"imports\":{");
+    for (i, pin) in pins.iter().enumerate() {
+        if i > 0 {
+            json.push(',');
+        }
+        json.push('"');
+        json.push_str(&json_escape(&pin.name));
+        json.push_str("\":\"");
+        json.push_str(&json_escape(&pin.path));
+        json.push('"');
+    }
+    json.push_str("}}");
+    Some(format!("def importmap_json\n  {json:?}\nend\n"))
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 pub(super) fn extract_session_cookie_key(source: &[u8]) -> Option<String> {

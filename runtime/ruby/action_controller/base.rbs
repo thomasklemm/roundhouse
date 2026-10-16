@@ -25,6 +25,15 @@ module ActionController
   def self.masked_authenticity_token: () -> String
   def self.csrf_token_valid?: (String given, String expected) -> bool
 
+  class ControllerConfig
+    @relative_url_root: String
+    def initialize: () -> void
+    def relative_url_root: () -> String
+    def relative_url_root=: (String value) -> String
+  end
+
+  def self.controller_config: () -> ControllerConfig
+
   class HeaderStore
     @keys: Array[String]
     @lower: Array[String]
@@ -226,6 +235,8 @@ module ActionController
     def cache_control_max_age: () -> Integer
     def cache_control_public: () -> bool
     def headers: () -> ActionController::HeaderStore
+    def config: () -> ControllerConfig
+    def helpers: () -> Base
     def send_data: (String data, ?type: String, ?disposition: String) -> void
     def verify_authenticity_token: () -> void
     def verified_request?: () -> bool

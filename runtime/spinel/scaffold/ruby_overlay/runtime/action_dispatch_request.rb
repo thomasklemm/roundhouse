@@ -175,6 +175,25 @@ module ActionDispatch
       "#{protocol}#{h}"
     end
 
+    # Twin of the shared Request: scheme stripped, standard port already
+    # dropped by `base_url`.
+    def host_with_port
+      b = base_url
+      p = protocol
+      return "" if b.length < p.length
+      b[p.length..].to_s
+    end
+
+    # Same memo as the shared class. This overlay replaces that class on
+    # the CRuby lane, so the method has to live here too.
+    def content_security_policy
+      return @content_security_policy if defined?(@csp_ready) && @csp_ready
+      @csp_ready = true
+      src = Rails.application.content_security_policy
+      @content_security_policy = src.nil? ? nil : src.dup
+      @content_security_policy
+    end
+
     def remote_ip
       @env["REMOTE_ADDR"] || "127.0.0.1"
     end
