@@ -54,7 +54,7 @@ env:
   # Mastodon (AGPL) is the scale case.
   MASTODON_SHA: 163f96cee4dea23365bff9b433871e68d20d9ee7
   RUBY_BENCH_SHA: d771f81f1ce9db51376e03ca7b8e6a83160556d4
-  CAMPFIRE_SHA: edbc779f4dfc9b26c36310881711ddc976a9dfc8
+  CAMPFIRE_SHA: 11d3fb9ce01faad3384807563053ba86126f747e
   # rubys/spinel-pg, the PostgreSQL driver the Spinel Db shim
   # (runtime/spinel/db_pg.rb) is tested against in spinel-framework.
   # Pinned like the apps above; bump deliberately.
@@ -1940,12 +1940,20 @@ jobs:
       # and will keep that file red for as long as a compiled target
       # has no per-object method table — or until upstream takes
       # basecamp/once-campfire#280, #279's twin for this file.
+      #
+      # 555/74 -> 568/77 on the CAMPFIRE_SHA bump to `11d3fb9c`
+      # (2026-10-16: enforcing script CSP). 16 commits past `edbc779f`.
+      # Measured on the ruby lane against that tree: 568 of 584 tests,
+      # 77 of 86 files. Message creation is already green on this
+      # compiler. The new reds are the CSP header, Nokogiri `*:` /
+      # css-class (libxml loaded by `require "vips"` before nokogiri),
+      # and the four `ActiveRecord::Tasks` cases, which stay outside
+      # this pin. The blocking job keeps the constant. It does not
+      # follow Campfire main.
         env:
-          # Tip Campfire suite floor — 555/74 via hygiene + conditional GET
-          # (strict suite emit, ActiveStorage.paths + timed poster,
-          # NullRelation, fresh_when ETag → 304).
-          FLOOR_TESTS: 555
-          FLOOR_FILES: 74
+          # Tip Campfire suite floor — 568/77 at CAMPFIRE_SHA 11d3fb9c.
+          FLOOR_TESTS: 568
+          FLOOR_FILES: 77
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
