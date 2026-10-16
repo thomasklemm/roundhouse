@@ -1945,15 +1945,24 @@ jobs:
       # (2026-10-16: enforcing script CSP). 16 commits past `edbc779f`.
       # Measured on the ruby lane against that tree: 568 of 584 tests,
       # 77 of 86 files. Message creation is already green on this
-      # compiler. The new reds are the CSP header, Nokogiri `*:` /
-      # css-class (libxml loaded by `require "vips"` before nokogiri),
-      # and the four `ActiveRecord::Tasks` cases, which stay outside
-      # this pin. The blocking job keeps the constant. It does not
-      # follow Campfire main.
+      # compiler (`d5bbeaaaa`; `message-creation-tx` is `at_zero`).
+      # The blocking job keeps the constant. It does not follow
+      # Campfire main.
+      #
+      # 568/77 -> 576/81. Cached pages write the narrowed script
+      # Content-Security-Policy (cached_responses 13/13). ruby-vips
+      # loads after boot, so Nokogiri keeps the libxml that accepts
+      # `*:` and css-class() (messages_helper 17/17, boosts 5/5,
+      # rooms_refreshes 1/1). Still red, and outside this floor:
+      # ActiveRecord::Tasks 0/4, ActionView::Base 8/9, deferred
+      # preload 9/10, room destroy 10/11, Object#extend 13/14.
+      # A parallel run can lose a channel file to Errno::EEXIST on
+      # `tmp/test`; those files are green serially and are counted
+      # here.
         env:
-          # Tip Campfire suite floor — 568/77 at CAMPFIRE_SHA 11d3fb9c.
-          FLOOR_TESTS: 568
-          FLOOR_FILES: 77
+          # Tip Campfire suite floor — 576/81 at CAMPFIRE_SHA 11d3fb9c.
+          FLOOR_TESTS: 576
+          FLOOR_FILES: 81
         run: |
           set -euo pipefail
           tests=$(awk -F'|' '{p += $3} END {print p+0}' /tmp/campfire-tally.txt)
