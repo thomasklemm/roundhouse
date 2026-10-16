@@ -6133,6 +6133,60 @@ end
         .assert_passes();
 }
 
+/// A template `form_with` enters `ActionView::Base#form_with` when the
+/// site runs, and a fragment-cache hit does not enter it again. The
+/// markup stays the lowered expansion's; the instance call is what
+/// `any_instance.expects(:form_with)` counts (campfire's
+/// `FragmentRenderingTest` message-controls example).
+#[test]
+fn cached_form_with_enters_action_view_base_only_on_miss() {
+    emit_and_run::real_blog()
+        .write(
+            "app/views/articles/_cached_form.html.erb",
+            "<% cache article do %><%= form_with model: article do |form| %><%= form.text_field :title %><% end %><% end %>\n",
+        )
+        .run_ruby(
+            r#"
+module ActionView
+  class Base
+    def self.entries
+      @entries.nil? ? 0 : @entries
+    end
+
+    def self.note!
+      @entries = entries + 1
+      nil
+    end
+
+    def form_with
+      ActionView::Base.note!
+    end
+  end
+end
+
+article = Article.create!(title: "Cached form", body: "Body text here")
+ActionController::Base.perform_caching = true
+ActionController::Base.cache_store = ActiveSupport::Cache::MemoryStore.new
+ActionController::Current.controller = ActionController::Base.new
+
+first = Views::Articles.cached_form(article)
+raise "form missing on miss: #{first.inspect}" unless first.include?("<form") && first.include?("Cached form")
+raise "miss did not enter form_with (#{ActionView::Base.entries})" unless ActionView::Base.entries == 1
+
+second = Views::Articles.cached_form(article)
+raise "form missing on hit: #{second.inspect}" unless second.include?("<form") && second.include?("Cached form")
+raise "cache hit re-entered form_with (#{ActionView::Base.entries})" unless ActionView::Base.entries == 1
+
+article.update!(title: "Cached form edited")
+third = Views::Articles.cached_form(article)
+raise "edited form missing: #{third.inspect}" unless third.include?("Cached form edited")
+raise "key change did not enter form_with (#{ActionView::Base.entries})" unless ActionView::Base.entries == 2
+puts "cached form_with entry passed"
+"#,
+        )
+        .assert_passes();
+}
+
 /// `offset(n).exists?` asks for a row past the first n (campfire's
 /// `paged?`, basecamp/once-campfire#297) where a COUNT ignored the offset;
 /// and the caching knobs campfire's messages caching test turns

@@ -94,6 +94,21 @@ pub(super) fn emit_form_tag_inline(args: &[Expr], block: &Expr, ctx: &ViewCtx) -
     out
 }
 
+/// `ActionView::Base.new.form_with` — the view-context entry a template
+/// `form_with` site makes before its macro-expanded markup. Placed in
+/// the expansion itself, so a `<% cache %>` hit that skips the body
+/// skips the call too. See `runtime/ruby/action_view/base.rb`.
+fn observe_form_with_entry() -> Expr {
+    let base = Expr::new(
+        Span::synthetic(),
+        ExprNode::Const {
+            path: vec![Symbol::from("ActionView"), Symbol::from("Base")],
+        },
+    );
+    let instance = send(Some(base), "new", Vec::new(), None, false);
+    send(Some(instance), "form_with", Vec::new(), None, false)
+}
+
 /// `<%= form_with url: …, method: :delete, id: … %>` with NO block.
 ///
 /// Rails renders an EMPTY `<form>` — open tag, `_method` override, CSRF
@@ -165,6 +180,7 @@ pub(super) fn emit_form_with_blockless(args: &[Expr], ctx: &ViewCtx) -> Option<V
         id_prefix: String::new(),
     };
     Some(vec![
+        observe_form_with_entry(),
         emit_open_form_tag(&comps, ctx, false),
         accumulator_append_call(
             view_helpers_call("method_override_input", vec![method]),
@@ -217,7 +233,7 @@ pub(super) fn emit_form_with_inline(
         return vec![accumulator_append_call(lit_str(String::new()), ctx)];
     };
 
-    let mut out: Vec<Expr> = Vec::new();
+    let mut out: Vec<Expr> = vec![observe_form_with_entry()];
 
     // Bind locals before emitting the open tag so the open-tag's
     // action interp can read them. `<form_param>_record` holds the
@@ -1463,6 +1479,7 @@ mod tests {
         let out = emit_form_with_blockless(&args, &ctx).expect("url-only form_with lowers");
         let text = emitted_text(&out);
         assert!(text.contains("<form action="), "{text}");
+        assert!(text.contains("<form_with>"), "{text}");
         assert!(text.contains("method_override_input"), "{text}");
         assert!(text.contains("csrf_token_hidden_input"), "{text}");
     }
