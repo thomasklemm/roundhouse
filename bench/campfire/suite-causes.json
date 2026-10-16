@@ -92,7 +92,8 @@
       "owner": "compiler",
       "match": ".",
       "match_test": "(Message::CreationTest|MessageCreationCommitTest|Message::SearchableTest)#",
-      "note": "Creation commit ordering, failed index/unread rollback, outer rollback restoring counter/jobs, and searchable reindex word replace. High density if one AR transaction / after_create_commit seam is wrong."
+      "note": "Creation commit ordering, failed index/unread rollback, outer rollback restoring counter/jobs, and searchable reindex word replace. High density if one AR transaction / after_create_commit seam is wrong.",
+      "at_zero": "served by d5bbeaaaa (transactional saves, deferred commit callbacks, automatic inverses) on 448bfea2e; the three files measure 15/15 (was 10/15, five fails, on 61a8f105f). The rule stays as a regression tripwire."
     },
     {
       "slug": "sqlite-wal-checkpoint",
