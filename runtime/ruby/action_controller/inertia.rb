@@ -87,6 +87,21 @@ module ActionController
       nil
     end
 
+    # `render inertia:, props: page_props` — the hash is computed, so its
+    # keys are not known when the call is lowered. Each entry is an eager
+    # prop. `InertiaRails.optional` / `.defer` still require a literal
+    # hash, where the lowerer can see the wrapper. A partial reload uses
+    # the same `eager?` gate a literal eager prop uses.
+    def merge_props(hash)
+      return nil if hash.nil?
+      return nil unless hash.is_a?(Hash)
+      hash.keys.each do |key|
+        name = key.to_s
+        prop_json(name, JsonBuilder.encode_value(hash[key])) if eager?(name)
+      end
+      nil
+    end
+
     def page_json(url, notice, alert)
       out = "{\"component\":" + JsonBuilder.encode_value(@component)
       out = out + ",\"props\":{"

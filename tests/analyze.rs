@@ -5491,6 +5491,40 @@ fn inertia_share_and_render_inertia_analyze_without_errors_or_survey_gaps() {
 }
 
 #[test]
+fn render_inertia_with_computed_props_has_no_survey_gap() {
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        r#"class WidgetsController < ApplicationController
+  def index
+    render inertia: "widgets/index", props: index_props
+  end
+
+  def show
+    props = { name: "local" }
+    render inertia: "widgets/show", props: props
+  end
+
+  def merged
+    render inertia: "widgets/merged", props: index_props.merge(extra: 1)
+  end
+
+  private
+    def index_props
+      { name: "from-method" }
+    end
+end
+"#,
+    );
+    let (errors, gaps) = inertia_check(&files);
+    assert!(errors.is_empty(), "{errors:#?}");
+    assert!(
+        !gaps.iter().any(|g| g.contains("props:")),
+        "{gaps:#?}"
+    );
+}
+
+#[test]
 fn render_inertia_with_a_computed_component_is_a_survey_gap() {
     let mut files = INERTIA_APP.to_vec();
     files[5] = (

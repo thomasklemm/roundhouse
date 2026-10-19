@@ -22,6 +22,7 @@ module ActionController
     def deferred?: (String key, String group) -> bool
     def mark_shared: (String key) -> nil
     def prop_json: (String key, String json) -> nil
+    def merge_props: (untyped hash) -> nil
     def page_json: (String url, String? notice, String? alert) -> String
     def flash_json: (String? notice, String? alert) -> String
     def shared_json: () -> String
