@@ -1,5 +1,11 @@
 # frozen_string_literal: true
-require_relative "active_support_interval"
+# Emitted trees place this file beside `active_support_interval.rb`.
+# The source tree keeps that one parser under `runtime/spinel/`.
+begin
+  require_relative "active_support_interval"
+rescue LoadError
+  require_relative "../../../active_support_interval"
+end
 # Native date-only parsing plus UTC-safe timestamp parsing/stamping.
 #
 # Dates store as YYYY-MM-DD, with no time or zone. Separately,
