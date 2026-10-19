@@ -15646,7 +15646,7 @@ fn render_inertia_computed_props_answer_json_and_html() {
         .edit(
             "config/routes.rb",
             "  root \"articles#index\"\n",
-            "  root \"articles#index\"\n  get \"/pages/computed\", to: \"pages#computed\"\n  get \"/pages/local\", to: \"pages#local\"\n",
+            "  root \"articles#index\"\n  get \"/pages/computed\", to: \"pages#computed\"\n  get \"/pages/local\", to: \"pages#local\"\n  get \"/pages/bad\", to: \"pages#bad\"\n",
         )
         .write(
             "config/initializers/inertia_rails.rb",
@@ -15656,6 +15656,7 @@ fn render_inertia_computed_props_answer_json_and_html() {
             "app/controllers/pages_controller.rb",
             r#"class PagesController < ApplicationController
   def computed
+    @stamp = "from-ivar"
     render inertia: "pages/computed", props: computed_props
   end
 
@@ -15664,9 +15665,20 @@ fn render_inertia_computed_props_answer_json_and_html() {
     render inertia: "pages/local", props: props
   end
 
+  def bad
+    render inertia: "pages/bad", props: "nope"
+  end
+
   private
     def computed_props
-      { title: "from-method", n: 1 }
+      {
+        title: "from-method",
+        n: 1,
+        label: -> { @stamp },
+        secret: InertiaRails.optional { "opt" },
+        stats: InertiaRails.defer { { total: 3 } },
+        when: Time.utc(2026, 10, 19, 11, 22, 0)
+      }
     end
 end
 "#,
@@ -15676,10 +15688,28 @@ end
             r#"require "test_helper"
 
 class PagesControllerTest < ActionDispatch::IntegrationTest
-  test "a method hash is the page props" do
+  test "a method hash evaluates lambdas and defers the rest" do
     get "/pages/computed", headers: { "X-Inertia" => "true" }
     assert_response :success
-    assert_equal({ "title" => "from-method", "n" => 1 }, response.parsed_body["props"])
+    page = response.parsed_body
+    assert_equal "from-method", page["props"]["title"]
+    assert_equal 1, page["props"]["n"]
+    assert_equal "from-ivar", page["props"]["label"]
+    assert_equal "2026-10-19T11:22:00.000Z", page["props"]["when"]
+    assert_nil page["props"]["secret"]
+    assert_nil page["props"]["stats"]
+    assert_equal({ "default" => ["stats"] }, page["deferredProps"])
+  end
+
+  test "a partial reload evaluates the requested optional and deferred props" do
+    get "/pages/computed", headers: {
+      "X-Inertia" => "true",
+      "X-Inertia-Partial-Component" => "pages/computed",
+      "X-Inertia-Partial-Data" => "secret,stats"
+    }
+    assert_response :success
+    assert_equal({ "secret" => "opt", "stats" => { "total" => 3 } }, response.parsed_body["props"])
+    assert_nil response.parsed_body["deferredProps"]
   end
 
   test "a local hash is the page props" do
@@ -15697,6 +15727,12 @@ class PagesControllerTest < ActionDispatch::IntegrationTest
     }
     assert_response :success
     assert_equal({ "n" => 1 }, response.parsed_body["props"])
+  end
+
+  test "a non-hash is not an empty page" do
+    assert_raises(TypeError) do
+      get "/pages/bad", headers: { "X-Inertia" => "true" }
+    end
   end
 end
 "#,

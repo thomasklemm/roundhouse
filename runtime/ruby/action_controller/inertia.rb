@@ -87,21 +87,6 @@ module ActionController
       nil
     end
 
-    # `render inertia:, props: page_props` — the hash is computed, so its
-    # keys are not known when the call is lowered. Each entry is an eager
-    # prop. `InertiaRails.optional` / `.defer` still require a literal
-    # hash, where the lowerer can see the wrapper. A partial reload uses
-    # the same `eager?` gate a literal eager prop uses.
-    def merge_props(hash)
-      return nil if hash.nil?
-      return nil unless hash.is_a?(Hash)
-      hash.keys.each do |key|
-        name = key.to_s
-        prop_json(name, JsonBuilder.encode_value(hash[key])) if eager?(name)
-      end
-      nil
-    end
-
     def page_json(url, notice, alert)
       out = "{\"component\":" + JsonBuilder.encode_value(@component)
       out = out + ",\"props\":{"
@@ -219,6 +204,75 @@ module ActionController
       nil
     end
 
+    # `render inertia:, props: page_props`. The hash is a value, so its
+    # keys are not known when the call is lowered. A Proc is run on this
+    # controller, the same way a literal `-> { }` is inlined. An
+    # `InertiaRails` prop uses the same eager / optional / deferred gate
+    # a literal wrapper does, and is not evaluated unless that gate
+    # opens. The value is then `JsonRender.encode`, the encoder a
+    # non-primitive literal prop already uses. Anything that is not a
+    # Hash raises; an empty page would hide the mistake.
+    def merge_inertia_props(hash)
+      raise TypeError, "inertia props must be a Hash" unless hash.is_a?(Hash)
+      page = inertia_page
+      hash.keys.each do |key|
+        apply_inertia_prop(page, key.to_s, hash[key])
+      end
+      nil
+    end
+
+    def apply_inertia_prop(page, name, raw)
+      if raw.is_a?(InertiaRails::Prop)
+        kind = raw.kind
+        if kind == "defer"
+          if page.deferred?(name, raw.group)
+            page.prop_json(name, inertia_prop_json(raw.call(self)))
+          end
+        elsif kind == "optional"
+          if page.optional?(name)
+            page.prop_json(name, inertia_prop_json(raw.call(self)))
+          end
+        elsif kind == "always"
+          page.prop_json(name, inertia_prop_json(raw.call(self)))
+        end
+      elsif raw.is_a?(Proc)
+        if page.eager?(name)
+          page.prop_json(name, inertia_prop_json(inertia_exec(raw)))
+        end
+      elsif page.eager?(name)
+        page.prop_json(name, inertia_prop_json(raw))
+      end
+      nil
+    end
+
+    # `JsonRender.encode` is the literal-prop encoder, and it is not a
+    # method this file can name: its body lives with the ruby-family
+    # renderer and is not in this typed surface. `ActiveSupport::JSON.encode`
+    # is that renderer's Rails shape for the values a prop holds (nil,
+    # booleans, numbers, strings, symbols, times, arrays, and hashes)
+    # and is the encoder this path can see. A record's `as_json` is
+    # applied first, which is what `JsonRender` does before its walk.
+    def inertia_prop_json(value)
+      encoded = value
+      unless value.nil? || value == true || value == false || value.is_a?(String) || value.is_a?(Integer) || value.is_a?(Float) || value.is_a?(Symbol) || value.is_a?(Time) || value.is_a?(Array) || value.is_a?(Hash)
+        encoded = value.as_json
+      end
+      ActiveSupport::JSON.encode(encoded)
+    end
+
+    # Kernel's method, named on this class so a computed prop can run
+    # with the controller as `self`. A literal `-> { }` is inlined in
+    # the action and already sees the controller's ivars; `super`
+    # forwards the block the same way. The runtime typer does not know
+    # Kernel, and an unknown call would be a `Ty::Var`.
+    def instance_exec(*args)
+      super
+    end
+
+    def inertia_exec(work)
+      instance_exec(&work)
+    end
+
     def inertia_url
       req = request
       return "/" if req.nil?
@@ -260,5 +314,54 @@ module ActionController
         "<div id=\"app\" data-page=\"" + ActionView::ViewHelpers.html_escape(json) + "\"></div>"
       end
     end
+  end
+end
+
+# The objects a computed props hash can hold. A literal hash never
+# builds these: the lowerer sees `-> { }`, `InertiaRails.optional` and
+# `.defer` and emits the gate itself. A helper that returns the same
+# wrappers builds them here, and `merge_inertia_props` reads `kind`.
+module InertiaRails
+  class Prop
+    def initialize(kind, group)
+      @kind = kind
+      @group = group
+      @block = nil
+    end
+
+    def kind
+      @kind
+    end
+
+    def group
+      @group
+    end
+
+    def store(work)
+      @block = work
+      nil
+    end
+
+    def call(controller)
+      controller.inertia_exec(@block)
+    end
+  end
+
+  def self.optional(&block)
+    prop = Prop.new("optional", "")
+    prop.store(block)
+    prop
+  end
+
+  def self.defer(group: "default", &block)
+    prop = Prop.new("defer", group)
+    prop.store(block)
+    prop
+  end
+
+  def self.always(&block)
+    prop = Prop.new("always", "")
+    prop.store(block)
+    prop
   end
 end

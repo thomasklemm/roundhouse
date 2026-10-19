@@ -22,7 +22,6 @@ module ActionController
     def deferred?: (String key, String group) -> bool
     def mark_shared: (String key) -> nil
     def prop_json: (String key, String json) -> nil
-    def merge_props: (untyped hash) -> nil
     def page_json: (String url, String? notice, String? alert) -> String
     def flash_json: (String? notice, String? alert) -> String
     def shared_json: () -> String
@@ -39,9 +38,32 @@ module ActionController
     def inertia_begin: (String component, String version, bool encrypt_history, bool always_include_errors_hash) -> nil
     def inertia_stale_version?: (String version) -> bool
     def inertia_errors_json: (String json) -> nil
+    def merge_inertia_props: (untyped hash) -> nil
+    def apply_inertia_prop: (ActionController::InertiaPage page, String name, untyped raw) -> nil
+    def inertia_prop_json: (untyped value) -> String
+    def instance_exec: (*untyped args) -> untyped
+    def inertia_exec: (untyped work) -> untyped
     def inertia_url: () -> String
     def render_inertia_json: (?status: Symbol) -> nil
     def inertia_redirect_see_other: () -> nil
     def inertia_root_html: (bool use_script_element) -> String
   end
+end
+
+module InertiaRails
+  class Prop
+    @kind: String
+    @group: String
+    @block: untyped
+
+    def initialize: (String kind, String group) -> void
+    def kind: () -> String
+    def group: () -> String
+    def store: (untyped work) -> nil
+    def call: (untyped controller) -> untyped
+  end
+
+  def self.optional: () { () -> untyped } -> InertiaRails::Prop
+  def self.defer: (?group: String) { () -> untyped } -> InertiaRails::Prop
+  def self.always: () { () -> untyped } -> InertiaRails::Prop
 end

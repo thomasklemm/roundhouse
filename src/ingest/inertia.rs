@@ -550,10 +550,11 @@ fn render_replacement(e: &Expr, ctx: &RenderCtx) -> Option<Expr> {
             Some("status") => status = Some(v.clone()),
             Some("props") => {
                 let ExprNode::Hash { entries: pairs, .. } = &*v.node else {
-                    // `props: page_props`, `props: props`, `props: helper.merge(...)`.
-                    // The hash is a value, evaluated once, and each pair is an
-                    // eager prop. A literal hash stays the path that can see
-                    // `InertiaRails.optional` / `.defer`.
+                    // `props: page_props`, `props: props`, `props: helper(...)`.
+                    // The hash is a value. `merge_inertia_props` evaluates a
+                    // Proc on the controller and gates `InertiaRails.optional`
+                    // / `.defer` the way a literal hash does. A literal hash
+                    // stays the path that can see those wrappers in the AST.
                     dynamic_props = Some(v.clone());
                     continue;
                 };
@@ -597,12 +598,7 @@ fn render_replacement(e: &Expr, ctx: &RenderCtx) -> Option<Expr> {
         stmts.push(prop_stmt(span, &p, false));
     }
     if let Some(value) = dynamic_props {
-        stmts.push(call(
-            span,
-            Some(call(span, None, "inertia_page", Vec::new())),
-            "merge_props",
-            vec![value],
-        ));
+        stmts.push(call(span, None, "merge_inertia_props", vec![value]));
     }
     let status_kw = |s: &Expr| (sym(span, "status"), s.clone());
     let json = call(
