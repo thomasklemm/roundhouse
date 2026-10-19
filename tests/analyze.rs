@@ -5491,6 +5491,33 @@ fn inertia_share_and_render_inertia_analyze_without_errors_or_survey_gaps() {
 }
 
 #[test]
+fn inertia_clear_history_redirect_is_not_a_survey_gap() {
+    for source in [
+        "class WidgetsController < ApplicationController\n  def destroy\n    redirect_to \"/widgets\", inertia: { clear_history: true }\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def update\n    redirect_to \"/widgets\", inertia: { errors: { name: [\"bad\"] }, clear_history: false }\n  end\nend\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files[5] = ("app/controllers/widgets_controller.rb", source);
+        let (errors, gaps) = inertia_check(&files);
+        assert!(errors.is_empty(), "{source}\n{errors:#?}");
+        assert!(
+            !gaps.iter().any(|g| g.contains("redirect option")),
+            "{source}\n{gaps:#?}"
+        );
+    }
+    let mut files = INERTIA_APP.to_vec();
+    files[5] = (
+        "app/controllers/widgets_controller.rb",
+        "class WidgetsController < ApplicationController\n  def update\n    redirect_to \"/widgets\", inertia: { flash: \"no\" }\n  end\nend\n",
+    );
+    let (_, gaps) = inertia_check(&files);
+    assert!(
+        gaps.iter().any(|g| g.contains("`inertia:` redirect option other than `errors:` or `clear_history:`")),
+        "{gaps:#?}"
+    );
+}
+
+#[test]
 fn render_inertia_with_a_computed_component_is_a_survey_gap() {
     let mut files = INERTIA_APP.to_vec();
     files[5] = (

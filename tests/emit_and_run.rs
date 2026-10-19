@@ -15819,6 +15819,77 @@ end
         .assert_passes();
 }
 
+#[test]
+fn inertia_clear_history_reaches_the_next_visit_once() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/show\", to: \"pages#show\"\n  delete \"/pages\", to: \"pages#destroy\"\n  delete \"/pages/keep\", to: \"pages#keep\"\n",
+        )
+        .write(
+            "config/initializers/inertia_rails.rb",
+            "InertiaRails.configure do |config|\n  config.version = \"v1\"\n  config.always_include_errors_hash = true\n  config.use_script_element_for_initial_page = true\nend\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  def show
+    render inertia: "pages/show", props: { title: "kept" }
+  end
+
+  def destroy
+    redirect_to "/pages/show", inertia: { errors: { base: ["gone"] }, clear_history: true }
+  end
+
+  def keep
+    redirect_to "/pages/show", inertia: { clear_history: false }
+  end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  INERTIA = { "X-Inertia" => "true", "X-Inertia-Version" => "v1" }
+
+  test "clear_history is on the next visit and then gone" do
+    delete "/pages", headers: INERTIA
+    assert_response 303
+    assert_redirected_to "/pages/show"
+    get "/pages/show", headers: INERTIA
+    assert_equal true, response.parsed_body["clearHistory"]
+    assert_equal({ "base" => ["gone"] }, response.parsed_body["props"]["errors"])
+    get "/pages/show", headers: INERTIA
+    assert_equal false, response.parsed_body["clearHistory"]
+    assert_equal({}, response.parsed_body["props"]["errors"])
+  end
+
+  test "a stale version keeps clear_history for the full-page reload" do
+    delete "/pages", headers: INERTIA
+    get "/pages/show", headers: { "X-Inertia" => "true", "X-Inertia-Version" => "v0" }
+    assert_response 409
+    get "/pages/show"
+    assert_includes response.body, %("clearHistory":true)
+    get "/pages/show"
+    assert_includes response.body, %("clearHistory":false)
+  end
+
+  test "a false flag does not clear history" do
+    delete "/pages/keep", headers: INERTIA
+    assert_response 303
+    get "/pages/show", headers: INERTIA
+    assert_equal false, response.parsed_body["clearHistory"]
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
 /// The same boundary on the native lane, which sanitizes with the shared
 /// runtime's safe-list scanner rather than the rails-html-sanitizer gem.
 #[test]

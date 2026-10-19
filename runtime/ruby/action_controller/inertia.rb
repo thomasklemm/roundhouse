@@ -18,6 +18,7 @@ module ActionController
       @shared_keys = []
       @deferred_groups = []
       @deferred_keys = []
+      @clear_history = false
     end
 
     def start_page(component, version, encrypt_history, partial_component, partial_data, partial_except)
@@ -32,6 +33,7 @@ module ActionController
       @shared_keys = []
       @deferred_groups = []
       @deferred_keys = []
+      @clear_history = false
       nil
     end
 
@@ -68,6 +70,11 @@ module ActionController
       requested?(key)
     end
 
+    def mark_clear_history
+      @clear_history = true
+      nil
+    end
+
     # Shared props are registered separately from the evaluate? guards so
     # share synthesis and page props share one eager?/optional?/deferred?
     # surface (predicates stay non-mutating aside from deferred bookkeeping).
@@ -99,7 +106,7 @@ module ActionController
       out = out + "},\"url\":" + JsonBuilder.encode_value(url)
       out = out + ",\"version\":" + (@version.empty? ? "null" : JsonBuilder.encode_value(@version))
       out = out + ",\"encryptHistory\":" + (@encrypt_history ? "true" : "false")
-      out = out + ",\"clearHistory\":false"
+      out = out + ",\"clearHistory\":" + (@clear_history ? "true" : "false")
       out = out + flash_json(notice, alert)
       out + shared_json + deferred_json + "}"
     end
@@ -188,6 +195,13 @@ module ActionController
         page.mark_shared("errors")
         page.prop_json("errors", "{}")
       end
+      # Same once-only session slot as errors. A stale-version 409 returns
+      # above, so the flag stays for the full-page reload that follows.
+      cleared = session["inertia_clear_history"]
+      if cleared == "true"
+        session.delete("inertia_clear_history")
+        page.mark_clear_history
+      end
       nil
     end
 
@@ -201,6 +215,13 @@ module ActionController
     # value's `to_s`, so a Hash would come back as its `inspect` String.
     def inertia_errors_json(json)
       session["inertia_errors"] = json
+      nil
+    end
+
+    # The session stores each value's `to_s`, so the flag is the string
+    # `"true"` rather than a boolean. A false or nil option stores nothing.
+    def inertia_clear_history(flag)
+      session["inertia_clear_history"] = "true" if flag
       nil
     end
 

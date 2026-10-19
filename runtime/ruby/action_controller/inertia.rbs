@@ -11,6 +11,7 @@ module ActionController
     @shared_keys: Array[String]
     @deferred_groups: Array[String]
     @deferred_keys: Array[String]
+    @clear_history: bool
 
     def initialize: () -> void
     def version: () -> String
@@ -20,6 +21,7 @@ module ActionController
     def eager?: (String key) -> bool
     def optional?: (String key) -> bool
     def deferred?: (String key, String group) -> bool
+    def mark_clear_history: () -> nil
     def mark_shared: (String key) -> nil
     def prop_json: (String key, String json) -> nil
     def page_json: (String url, String? notice, String? alert) -> String
@@ -38,6 +40,7 @@ module ActionController
     def inertia_begin: (String component, String version, bool encrypt_history, bool always_include_errors_hash) -> nil
     def inertia_stale_version?: (String version) -> bool
     def inertia_errors_json: (String json) -> nil
+    def inertia_clear_history: (untyped flag) -> nil
     def inertia_url: () -> String
     def render_inertia_json: (?status: Symbol) -> nil
     def inertia_redirect_see_other: () -> nil
