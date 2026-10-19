@@ -318,8 +318,9 @@ fn refused_route_diagnostics(entries: &[RouteSpec], source: &[u8], file: &str) -
             "route constraint",
             format!(
                 "{verb} {} is not dispatched: `{param}:` requirement `{rx}` is outside the \
-                 router's segment-pattern subset (no lookahead, backreference, alternation, \
-                 anchors, or backtracking); its URL helper is still generated",
+                 router's segment-pattern subset (no lookahead, backreference, anchors, \
+                 unbounded repetition of an alternation, or a repeat that would backtrack); \
+                 its URL helper is still generated",
                 route.path
             ),
         ));
@@ -1814,7 +1815,7 @@ fn redirect_literal(node: &Node<'_>) -> Option<(String, u16, bool)> {
         return None;
     }
     if let Some(block) = call.block().and_then(|block| block.as_block_node()) {
-        let (location, status) = redirect_block(block, redirect_status_from_call(&call))?;
+        let (location, status) = redirect_block(block, redirect_status_from_call(&call)?)?;
         return Some((location, status, false));
     }
     let Some(arguments) = call.arguments() else { return None };
@@ -1831,14 +1832,7 @@ fn redirect_literal(node: &Node<'_>) -> Option<(String, u16, bool)> {
             let Some(assoc) = element.as_assoc_node() else { continue };
             let Some(key) = symbol_value(&assoc.key()) else { continue };
             match key.as_str() {
-                "status" => {
-                    let value = assoc.value();
-                    let code = value
-                        .as_integer_node()
-                        .and_then(|i| super::util::integer_i64(&i.value()))
-                        .and_then(|i| u16::try_from(i).ok())?;
-                    status = code;
-                }
+                "status" => status = redirect_status_code(&assoc.value())?,
                 // `redirect(path: "/login")` is Rails' options form of a
                 // path-only redirect: the same location a positional
                 // string carries, without host, protocol, or query.
@@ -1890,54 +1884,93 @@ fn redirect_block(block: ruby_prism::BlockNode<'_>, status: u16) -> Option<(Stri
     Some((format!("\u{0}{rendered}"), status))
 }
 
-fn redirect_status_from_call(call: &ruby_prism::CallNode<'_>) -> u16 {
-    let Some(arguments) = call.arguments() else { return 301 };
+/// `status:` on `redirect`. An integer is the code. A symbol is read
+/// from the runtime status table, and kept only when
+/// `redirect_status_symbol` would emit that same name. Every other
+/// code is emitted as `:moved_permanently`, so accepting it here would
+/// serve the route at the wrong status. A string or an unknown symbol
+/// is not a redirect this can serve.
+fn redirect_status_code(node: &Node<'_>) -> Option<u16> {
+    if let Some(code) = node
+        .as_integer_node()
+        .and_then(|i| super::util::integer_i64(&i.value()))
+        .and_then(|i| u16::try_from(i).ok())
+    {
+        return Some(code);
+    }
+    let code = crate::lower::status_literal::status_sym_code(&symbol_value(node)?)?;
+    matches!(code, 300 | 301 | 302 | 303 | 304 | 307 | 308).then_some(code)
+}
+
+fn redirect_status_from_call(call: &ruby_prism::CallNode<'_>) -> Option<u16> {
+    let Some(arguments) = call.arguments() else { return Some(301) };
     for argument in arguments.arguments().iter() {
         let Some(hash) = argument.as_keyword_hash_node() else { continue };
         for element in hash.elements().iter() {
             let Some(assoc) = element.as_assoc_node() else { continue };
             let Some(key) = symbol_value(&assoc.key()) else { continue };
-            if key.as_str() != "status" {
-                continue;
-            }
-            if let Some(code) = assoc
-                .value()
-                .as_integer_node()
-                .and_then(|i| super::util::integer_i64(&i.value()))
-                .and_then(|i| u16::try_from(i).ok())
-            {
-                return code;
+            if key.as_str() == "status" {
+                return redirect_status_code(&assoc.value());
             }
         }
     }
-    301
+    Some(301)
 }
 
 fn redirect_expression_is_string(expr: &crate::expr::Expr) -> bool {
+    redirect_expression_is_string_in(expr, &mut HashSet::new())
+}
+
+/// A redirect block's value is a string. Locals count once this block
+/// has assigned them a string (`base = "/widgets/#{params[:id]}"`, then
+/// `query.empty? ? base : "#{base}?#{query}"`). Each branch of an `if`
+/// sees the assignments from before it, not from the other branch.
+fn redirect_expression_is_string_in(
+    expr: &crate::expr::Expr,
+    strings: &mut HashSet<Symbol>,
+) -> bool {
+    use crate::expr::{ExprNode, LValue, Literal};
     match &*expr.node {
-        crate::expr::ExprNode::Lit { value: crate::expr::Literal::Str { .. } } => true,
-        crate::expr::ExprNode::StringInterp { .. } => true,
-        crate::expr::ExprNode::If { then_branch, else_branch, .. } => {
-            redirect_expression_is_string(then_branch) && redirect_expression_is_string(else_branch)
+        ExprNode::Lit { value: Literal::Str { .. } } => true,
+        ExprNode::StringInterp { .. } => true,
+        ExprNode::Var { name, .. } => strings.contains(name),
+        ExprNode::If { then_branch, else_branch, .. } => {
+            let mut then_strings = strings.clone();
+            let mut else_strings = strings.clone();
+            redirect_expression_is_string_in(then_branch, &mut then_strings)
+                && redirect_expression_is_string_in(else_branch, &mut else_strings)
         }
-        crate::expr::ExprNode::Send { method, recv, args, .. } => {
+        ExprNode::Assign { target: LValue::Var { name, .. }, value } => {
+            let ok = redirect_expression_is_string_in(value, strings);
+            if ok {
+                strings.insert(name.clone());
+            } else {
+                strings.remove(name);
+            }
+            ok
+        }
+        ExprNode::Send { method, recv, args, .. } => {
             // `present?` is rewritten to `!(...).strip.empty?` before this
             // check. The result is a string when that call's argument is.
             if method.as_str() == "!" {
-                return args.iter().any(redirect_expression_is_string);
+                return args.iter().any(|arg| redirect_expression_is_string_in(arg, strings));
             }
             if matches!(method.as_str(), "strip" | "empty?") {
-                return recv.as_ref().is_some_and(redirect_expression_is_string)
-                    || args.iter().any(redirect_expression_is_string);
+                return recv.as_ref().is_some_and(|recv| redirect_expression_is_string_in(recv, strings))
+                    || args.iter().any(|arg| redirect_expression_is_string_in(arg, strings));
             }
             matches!(
                 method.as_str(),
                 "query_string" | "path" | "fullpath" | "to_s" | "+" | "[]" | "present?"
             )
         }
-        crate::expr::ExprNode::Seq { exprs } => exprs
-            .last()
-            .is_some_and(redirect_expression_is_string),
+        ExprNode::Seq { exprs } => {
+            let mut last = false;
+            for expr in exprs {
+                last = redirect_expression_is_string_in(expr, strings);
+            }
+            last
+        }
         _ => false,
     }
 }
@@ -3065,9 +3098,10 @@ fn ingest_explicit_route(
                         } else if let Some(r) = redirect_literal(value) {
                             redirect_target = Some(r);
                         } else {
-                            // A block redirect (`redirect { |p, req| … }`)
-                            // carries no literal to serve, so it stays
-                            // dropped — with the ledger line #82 added.
+                            // A redirect this subset cannot serve (a block
+                            // whose value is not a string, or an options
+                            // form that rebuilds the host). The ledger
+                            // line is the drop below.
                             to_is_unsupported = true;
                         }
                     }
@@ -3160,8 +3194,10 @@ fn ingest_explicit_route(
             controller: ClassId(Symbol::from(REDIRECT_CONTROLLER)),
             action,
             as_name,
-            constraints: IndexMap::new(),
-            scope: ResourceScope::default(),
+            constraints,
+            // `on: :member` / `on: :collection` still decide the path.
+            // Nested is the default a bare verb inside `resources` gets.
+            scope: on_scope.unwrap_or(ResourceScope::Nested),
         }));
     }
     if to_is_unsupported {

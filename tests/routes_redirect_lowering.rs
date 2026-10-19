@@ -349,6 +349,24 @@ fn a_path_option_redirect_is_the_same_location_as_a_positional_string() {
 }
 
 #[test]
+fn a_symbol_status_and_a_constraint_stay_on_the_redirect() {
+    let app = app_with(
+        "  get \"/reports\", to: \"reports#index\"\n  get \"/old/:id\", to: redirect(status: :found) { |params| \"/reports/#{params[:id]}\" }, constraints: { id: /\\d+/ }\n  resources :reports, only: [:index] do\n    get \"legacy\", to: redirect(\"/archive\"), on: :member\n  end\n",
+    );
+    let emitted = redirect_controller(&app);
+    assert!(emitted.contains("status: :found"), "a symbol status is the code Rails names; got:\n{emitted}");
+    assert!(emitted.contains("params[:id]") || emitted.contains("@params"), "block interpolation; got:\n{emitted}");
+    let flat = roundhouse::lower::routes::flatten_routes(&app);
+    let old = flat.iter().find(|route| route.path == "/old/:id").expect("constrained redirect is dispatched");
+    assert_eq!(old.int_params, vec!["id".to_string()], "the digit constraint is enforced, not dropped: {old:?}");
+    assert!(
+        flat.iter().any(|route| route.path == "/reports/:id/legacy"),
+        "on: :member nests under :id; paths: {:?}",
+        flat.iter().map(|route| route.path.clone()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn a_path_option_replaces_a_positional_location() {
     // Rails' options hash wins: `redirect("/old", path: "/new")` goes to
     // `/new` and keeps the request query, the options-form behavior.

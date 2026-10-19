@@ -842,11 +842,38 @@ module ActionDispatch
 
     # Does the WHOLE of `value` satisfy `pattern` (one route's
     # compiled requirement for one param)? Anchored to the whole
-    # segment, as Rails anchors every routing requirement — walks
-    # `pattern`'s items strictly left to right over `value`, greedily,
-    # with no backtracking (see `segment_pattern.rs`'s module docs for
-    # why that is always correct for a pattern this compiled).
+    # segment, as Rails anchors every routing requirement.
+    #
+    # A pattern that starts with `A` is an ordered list of
+    # alternatives (`segment_pattern.rs` expands `|`, groups, and
+    # `{n,m}` into whole-segment sequences). The first alternative
+    # that matches wins. Anything else is one sequence, walked left
+    # to right with no backtracking.
     def self.segment_pattern_match(pattern, value)
+      if pattern.length > 0 && pattern[0, 1].to_s == "A"
+        return segment_pattern_alt_match(pattern, value)
+      end
+      segment_pattern_seq_match(pattern, value)
+    end
+
+    # `A` then `<len>.<pattern>` entries back to back, each pattern a
+    # sequence `segment_pattern_seq_match` reads. One counter step
+    # (`i += advance`), the shape the Elixir while-lowering accepts.
+    def self.segment_pattern_alt_match(pattern, value)
+      i = 1
+      while i < pattern.length
+        after_len = length_prefix_content_start(pattern, i)
+        len = length_prefix_value(pattern, i, after_len)
+        alt = pattern[after_len, len].to_s
+        return true if segment_pattern_seq_match(alt, value)
+        advance = after_len + len - i
+        i += advance
+      end
+      false
+    end
+
+    # One backtrack-free sequence. See `segment_pattern.rs`.
+    def self.segment_pattern_seq_match(pattern, value)
       pi = 0
       vi = 0
       while pi < pattern.length
