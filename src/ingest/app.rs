@@ -3333,12 +3333,13 @@ pub(super) fn filter_registration_order(
 
 /// One ancestry snapshot for both class-body expansion paths. Direct include
 /// order is retained for the existing filter-macro lookup contract; transitive
-/// membership and inherited instance names serve finite class configuration.
+/// membership serves finite class configuration. Instance methods of the same
+/// name are a different method (`ParamKey` includes the receiver) and are not
+/// part of this snapshot.
 pub(super) struct ControllerConcernSurface {
     pub direct_includes: Vec<crate::ident::ClassId>,
     pub includes: Vec<crate::ident::ClassId>,
     pub inherited_includes: Vec<crate::ident::ClassId>,
-    pub instance_methods: std::collections::HashSet<Symbol>,
 }
 
 pub(super) struct ControllerConcernSurfaces {
@@ -3355,7 +3356,6 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
     for controller in &app.controllers {
         let mut direct_includes = Vec::new();
         let mut inherited = Vec::new();
-        let mut instance_methods = std::collections::HashSet::new();
         let mut cur = Some(controller);
         let mut seen = std::collections::HashSet::new();
         while let Some(c) = cur {
@@ -3370,14 +3370,12 @@ pub(super) fn controller_concern_surfaces(app: &App) -> ControllerConcernSurface
                     direct_includes.push(inc);
                 }
             }
-            instance_methods.extend(c.actions().map(|a| a.name.clone()));
             cur = c.parent.as_ref().and_then(|p| app.controllers.iter().find(|o| &o.name == p));
         }
         controllers.insert(controller.name.clone(), ControllerConcernSurface {
             includes: filter_registration_order(&[direct_includes.clone()], &module_includes),
             inherited_includes: filter_registration_order(&[inherited], &module_includes),
             direct_includes,
-            instance_methods,
         });
     }
     ControllerConcernSurfaces { module_includes, controllers }

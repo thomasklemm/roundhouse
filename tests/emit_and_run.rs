@@ -3166,6 +3166,13 @@ puts "public files contract passed"
 }
 
 #[test]
+fn class_configuration_shares_a_name_with_an_instance_method() {
+    let run = class_configuration::same_name_overlay().run_ruby(class_configuration::SAME_NAME_ASSERTIONS);
+    run.assert_passes();
+    assert!(run.stdout.contains("class and instance configuration names passed"));
+}
+
+#[test]
 fn finite_concern_class_configuration_runs_without_replaying_rails() {
     for (overlay, assertions) in [
         (class_configuration::overlay(), class_configuration::ASSERTIONS),
