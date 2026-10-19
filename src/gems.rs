@@ -761,23 +761,28 @@ pub fn namespace_of(gem: &str) -> String {
         ("aws-sdk-core", "Aws"),
         ("bcrypt", "BCrypt"),
         ("cancancan", "CanCan"),
+        ("caxlsx", "Axlsx"),
         ("combine_pdf", "CombinePDF"),
+        ("duckdb", "DuckDB"),
         ("fast_excel", "FastExcel"),
         ("graphql", "GraphQL"),
         ("htmlentities", "HTMLEntities"),
         ("http", "HTTP"),
         ("i18n", "I18n"),
         ("jwt", "JWT"),
+        ("mcp", "MCP"),
         ("mini_magick", "MiniMagick"),
         ("net-http-persistent", "Net"),
         ("nokogiri", "Nokogiri"),
         ("oj", "Oj"),
         ("pdf-reader", "PDF"),
         ("pg", "PG"),
+        ("polars-df", "Polars"),
         ("rack-attack", "Rack"),
         ("rqrcode", "RQRCode"),
         ("rotp", "ROTP"),
         ("ruby-vips", "Vips"),
+        ("ruby_llm", "RubyLLM"),
         ("rubyzip", "Zip"),
         // sorbet-runtime's entire app-facing surface is `T` — `T.let`,
         // `T::Enum`, `T::Struct` — which the name-derived namespace
@@ -1395,6 +1400,14 @@ BUNDLED WITH
         assert_eq!(namespace_of("front_matter_parser"), "FrontMatterParser");
         assert_eq!(namespace_of("aws-sdk-s3"), "Aws");
         assert_eq!(namespace_of("rubyzip"), "Zip");
+        assert_eq!(namespace_of("polars-df"), "Polars");
+        assert_eq!(namespace_of("ruby_llm"), "RubyLLM");
+        assert_eq!(namespace_of("caxlsx"), "Axlsx");
+        assert_eq!(namespace_of("duckdb"), "DuckDB");
+        assert_eq!(namespace_of("mcp"), "MCP");
+        for gem in ["polars-df", "ruby_llm", "caxlsx", "duckdb", "mcp", "rubyzip"] {
+            assert_eq!(fate_of(gem), GemFate::Unknown, "{gem} stays unmodeled");
+        }
         let census = GemCensus::of(&Lockfile::parse(LOCK));
         assert_eq!(gem_owning_constant(&census, "Redcarpet::Markdown"), Some("redcarpet"));
         assert_eq!(namespace_of("sorbet-runtime"), "T");
@@ -1416,6 +1429,106 @@ BUNDLED WITH
         let lock = Lockfile::parse(LOCK);
         assert_eq!(gem_claiming_method(&lock, "policy_scope"), Some("pundit"));
         assert_eq!(gem_claiming_method(&lock, "acts_as_list"), None, "acts-as-list is not in this lock");
+    }
+
+    #[test]
+    fn irregular_namespaces_pass_through_ruby_emit_for_any_lockfile() {
+        let lock = "\
+GEM
+  remote: https://rubygems.org/
+  specs:
+    caxlsx (4.2.0)
+    duckdb (1.3.1)
+    mcp (0.4.0)
+    polars-df (0.20.0)
+    ruby_llm (1.8.2)
+    rubyzip (2.3.2)
+
+DEPENDENCIES
+  caxlsx
+  duckdb
+  mcp
+  polars-df
+  ruby_llm
+  rubyzip
+";
+        let source = "\
+class Export
+  def run
+    Zip::File.open(\"a.zip\")
+    Polars::DataFrame.new
+    RubyLLM.chat
+    Axlsx::Package.new
+    DuckDB::Database.open
+    MCP::Server.new
+  end
+end
+";
+        let tree = [
+            ("Gemfile.lock", lock),
+            ("lib/export.rb", source),
+        ]
+        .into_iter()
+        .map(|(path, text)| (std::path::PathBuf::from(path), text.as_bytes().to_vec()))
+        .collect();
+        let app = crate::ingest::ingest_app_from_tree(tree).expect("ingest locked irregular gems");
+        let namespaces = locked_external_gem_namespaces(&app);
+        for name in ["Zip", "Polars", "RubyLLM", "Axlsx", "DuckDB", "MCP"] {
+            assert!(namespaces.contains(name), "{name} missing from {namespaces:?}");
+        }
+        for miss in ["Rubyzip", "PolarsDf", "RubyLlm", "Caxlsx", "Duckdb", "Mcp"] {
+            assert!(
+                !namespaces.contains(miss),
+                "camelized miss {miss} must not be the Ruby-emit pass-through key"
+            );
+        }
+        assert!(
+            !detail_names_external_namespace("Mcp::Tool", "MCP"),
+            "an app module Mcp is a different constant from the mcp gem"
+        );
+        let census = GemCensus::of(app.gem_lock.as_ref().expect("lock"));
+        for gem in ["caxlsx", "duckdb", "mcp", "polars-df", "ruby_llm", "rubyzip"] {
+            assert_eq!(
+                census.gems.iter().find(|g| g.name == gem).map(|g| g.fate),
+                Some(GemFate::Unknown),
+                "{gem} must stay unknown"
+            );
+        }
+        assert_eq!(gem_owning_constant(&census, "Polars::DataFrame"), Some("polars-df"));
+        assert_eq!(gem_owning_constant(&census, "RubyLLM::Chat"), Some("ruby_llm"));
+        assert_eq!(gem_owning_constant(&census, "Axlsx::Package"), Some("caxlsx"));
+        assert_eq!(gem_owning_constant(&census, "DuckDB::Database"), Some("duckdb"));
+        assert_eq!(gem_owning_constant(&census, "MCP::Server"), Some("mcp"));
+        assert_eq!(gem_owning_constant(&census, "Zip::File"), Some("rubyzip"));
+
+        let files = crate::project::target_files(&app, std::path::Path::new("."), crate::project::BuildTarget::Ruby)
+            .expect("emit Ruby project");
+        let export = files
+            .iter()
+            .find(|(_, content)| content.contains("class Export"))
+            .map(|(_, content)| content.as_str())
+            .expect("emitted Export");
+        for konst in ["Zip::File", "Polars::DataFrame", "RubyLLM.chat", "Axlsx::Package", "DuckDB::Database", "MCP::Server"] {
+            assert!(
+                export.contains(konst),
+                "Ruby emit must keep locked gem constant {konst}:\n{export}"
+            );
+        }
+        assert!(
+            !export.contains("PolarsDf") && !export.contains("RubyLlm") && !export.contains("Caxlsx"),
+            "emit must not rewrite the gem's real constant:\n{export}"
+        );
+        let gemfile = files.iter().find(|(path, _)| path == "Gemfile").expect("Gemfile").1.as_str();
+        for pin in [
+            "gem \"caxlsx\", \"= 4.2.0\"",
+            "gem \"duckdb\", \"= 1.3.1\"",
+            "gem \"mcp\", \"= 0.4.0\"",
+            "gem \"polars-df\", \"= 0.20.0\"",
+            "gem \"ruby_llm\", \"= 1.8.2\"",
+            "gem \"rubyzip\", \"= 2.3.2\"",
+        ] {
+            assert!(gemfile.contains(pin), "missing {pin} in\n{gemfile}");
+        }
     }
 
     #[test]
