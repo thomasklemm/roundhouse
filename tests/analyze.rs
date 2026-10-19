@@ -5491,17 +5491,21 @@ fn inertia_share_and_render_inertia_analyze_without_errors_or_survey_gaps() {
 }
 
 #[test]
-fn render_inertia_with_a_computed_component_is_a_survey_gap() {
-    let mut files = INERTIA_APP.to_vec();
-    files[5] = (
-        "app/controllers/widgets_controller.rb",
+fn render_inertia_with_a_computed_component_has_no_survey_gap() {
+    for source in [
         "class WidgetsController < ApplicationController\n  def index\n    render inertia: \"widgets/\" + action_name\n  end\nend\n",
-    );
-    let (_, gaps) = inertia_check(&files);
-    assert!(
-        gaps.iter().any(|g| g.contains("`render inertia:` with a component that is not a String literal")),
-        "{gaps:#?}"
-    );
+        "class WidgetsController < ApplicationController\n  PAGE = \"widgets/index\"\n  def index\n    render inertia: PAGE\n  end\nend\n",
+        "class WidgetsController < ApplicationController\n  def index\n    render inertia: page_name\n  end\n  def page_name\n    \"widgets/index\"\n  end\nend\n",
+    ] {
+        let mut files = INERTIA_APP.to_vec();
+        files[5] = ("app/controllers/widgets_controller.rb", source);
+        let (errors, gaps) = inertia_check(&files);
+        assert!(errors.is_empty(), "{source}\n{errors:#?}");
+        assert!(
+            !gaps.iter().any(|g| g.contains("component")),
+            "{source}\n{gaps:#?}"
+        );
+    }
 }
 
 #[test]

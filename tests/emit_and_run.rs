@@ -15819,6 +15819,78 @@ end
         .assert_passes();
 }
 
+#[test]
+fn render_inertia_computed_component_answers_json_and_partial_reload() {
+    emit_and_run::real_blog()
+        .edit(
+            "config/routes.rb",
+            "  root \"articles#index\"\n",
+            "  root \"articles#index\"\n  get \"/pages/constant\", to: \"pages#constant\"\n  get \"/pages/named\", to: \"pages#named\"\n  get \"/pages/joined\", to: \"pages#joined\"\n",
+        )
+        .write(
+            "config/initializers/inertia_rails.rb",
+            "InertiaRails.configure do |config|\n  config.use_script_element_for_initial_page = true\nend\n",
+        )
+        .write(
+            "app/controllers/pages_controller.rb",
+            r#"class PagesController < ApplicationController
+  PAGE = "pages/from-constant"
+
+  def constant
+    render inertia: PAGE, props: { title: "c", n: 1 }
+  end
+
+  def named
+    render inertia: page_name, props: { title: "m", n: 2 }
+  end
+
+  def joined
+    render inertia: "pages/" + action_name, props: { title: "j", n: 3 }
+  end
+
+  private
+    def page_name
+      "pages/from-method"
+    end
+end
+"#,
+        )
+        .write(
+            "test/controllers/pages_controller_test.rb",
+            r#"require "test_helper"
+
+class PagesControllerTest < ActionDispatch::IntegrationTest
+  test "a constant is the component" do
+    get "/pages/constant", headers: { "X-Inertia" => "true" }
+    assert_response :success
+    assert_equal "pages/from-constant", response.parsed_body["component"]
+    assert_equal({ "title" => "c", "n" => 1 }, response.parsed_body["props"])
+  end
+
+  test "a method is the component and a partial reload matches that name" do
+    get "/pages/named", headers: {
+      "X-Inertia" => "true",
+      "X-Inertia-Partial-Component" => "pages/from-method",
+      "X-Inertia-Partial-Data" => "n"
+    }
+    assert_response :success
+    assert_equal "pages/from-method", response.parsed_body["component"]
+    assert_equal({ "n" => 2 }, response.parsed_body["props"])
+  end
+
+  test "a joined name is the component" do
+    get "/pages/joined"
+    assert_response :success
+    assert_includes response.body, %("component":"pages/joined")
+    assert_includes response.body, %("title":"j")
+  end
+end
+"#,
+        )
+        .run_test("test/controllers/pages_controller_test.rb")
+        .assert_passes();
+}
+
 /// The same boundary on the native lane, which sanitizes with the shared
 /// runtime's safe-list scanner rather than the rails-html-sanitizer gem.
 #[test]

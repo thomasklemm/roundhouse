@@ -535,11 +535,19 @@ fn render_replacement(e: &Expr, ctx: &RenderCtx) -> Option<Expr> {
         );
         None
     };
-    let ExprNode::Lit {
-        value: Literal::Str { value: component },
-    } = &*component.1.node
-    else {
-        return unsupported("with a component that is not a String literal");
+    // A string literal stays a literal. A constant, a concat, or a method
+    // is stringified once: partial reload compares that string with
+    // `X-Inertia-Partial-Component`.
+    let component_name = match &*component.1.node {
+        ExprNode::Lit {
+            value: Literal::Str { value },
+        } => str_lit(span, value),
+        _ => call(
+            component.1.span,
+            Some(component.1.clone()),
+            "to_s",
+            Vec::new(),
+        ),
     };
     let mut props: Vec<Prop> = Vec::new();
     let mut status: Option<Expr> = None;
@@ -578,7 +586,7 @@ fn render_replacement(e: &Expr, ctx: &RenderCtx) -> Option<Expr> {
         None,
         "inertia_begin",
         vec![
-            str_lit(span, component),
+            component_name,
             str_lit(span, &config.version),
             bool_lit(span, config.encrypt_history),
             bool_lit(span, config.always_include_errors_hash),
