@@ -2301,6 +2301,71 @@ fn backticks_ingest_as_the_kernel_call_and_round_trip() {
     }
 }
 
+/// `(month, *row)` in a block, and the same splat inside a nested
+/// multi-write. `MultiAssign` has no rest; the group is not an array
+/// literal, so the desugar coerces with `Array.try_convert` and then
+/// indexes. Nearby shapes: anonymous splat, post-rest, a deeper group,
+/// an ivar splat, and a splat group beside an outer name.
+#[test]
+fn nested_destructure_splat_ingests_and_round_trips() {
+    use roundhouse::emit::ruby::emit_expr;
+
+    let parse = |source: &str| {
+        let result = ruby_prism::parse(source.as_bytes());
+        assert_eq!(result.errors().count(), 0, "legal Ruby control: {source}");
+        let program = result.node();
+        roundhouse::ingest::ingest_expr(
+            &program.as_program_node().unwrap().statements().as_node(),
+            "<snippet>",
+        )
+        .unwrap_or_else(|err| panic!("{source}: {err}"))
+    };
+    for source in [
+        "rows.each_with_object({}) { |(month, *row), map| map[month] = row }",
+        "rows.each { |(month, *)| month }",
+        "rows.map { |(*row)| row }",
+        "rows.each { |(a, *b, c)| [a, b, c] }",
+        "->((month, *row)) { row }",
+        "a, (b, *c) = pairs",
+        "(a, *b), c = pairs",
+        "a, (b, (c, *d)) = pairs",
+        "a, (b, *c, d) = pairs",
+        "a, (@month, *@row) = pairs",
+        "x, (y, *z), *rest = pairs",
+    ] {
+        let expr = parse(source);
+        let emitted = emit_expr(&expr);
+        assert!(
+            emitted.contains("Array.try_convert"),
+            "nested splat must coerce with Array.try_convert, not require an array literal:\n{source}\n{emitted}"
+        );
+        if !source.contains(", *)") {
+            assert!(
+                emitted.contains(".drop("),
+                "a named rest must be the tail after the leading names:\n{source}\n{emitted}"
+            );
+        }
+        assert_eq!(expr, parse(&emitted), "round-trip IR must be stable for {source}:\n{emitted}");
+    }
+
+    // Depth-first Ruby writes the inner `x` last; the level-at-a-time
+    // desugar would leave the outer `x`. Same refusal as `(x, y), x = …`.
+    let result = ruby_prism::parse(b"(x, *y), x = [[1, 2], 3]");
+    let stmt = result.node().as_program_node().unwrap().statements().as_node();
+    let err = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").expect_err("reordered last write");
+    assert!(err.to_string().contains("out of source order"), "{err}");
+    // The outer write stays last, which is the order the desugar keeps.
+    parse("x, (y, *x) = [1, [2, 3]]");
+
+    for source in ["(h[0], *x), h[0] = [[1, 2], 3]", "(A, *x), A = [[1, 2], 3]"] {
+        let result = ruby_prism::parse(source.as_bytes());
+        assert_eq!(result.errors().count(), 0, "{source}");
+        let stmt = result.node().as_program_node().unwrap().statements().as_node();
+        let err = roundhouse::ingest::ingest_expr(&stmt, "<snippet>").expect_err(source);
+        assert!(err.to_string().contains("out of source order"), "{source}: {err}");
+    }
+}
+
 #[test]
 fn multi_write_with_post_rest_targets_ingests_and_round_trips() {
     use roundhouse::emit::ruby::emit_expr;

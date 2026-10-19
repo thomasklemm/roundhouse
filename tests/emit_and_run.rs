@@ -14202,6 +14202,129 @@ end
         .run_ruby(ASSERTIONS).assert_passes();
 }
 
+/// A splat inside a nested destructure: `(month, *row)` from
+/// `each_with_object`, plus the nearby shapes (anonymous splat, a
+/// trailing name, a scalar element, a deeper group). The emitted Ruby
+/// has to bind what MRI binds; a quiet ingest is not that claim.
+#[test]
+fn nested_destructure_splat_binds_the_tail() {
+    const SOURCE: &str = r#"class AryBox
+  def to_ary
+    [7, 8, 9]
+  end
+end
+
+class NestedSplatProbe
+  def self.each_with_object
+    [[1, 2, 3, 4], [5]].each_with_object({}) { |(month, *row), map| map[month] = row }
+  end
+  def self.anonymous
+    out = []
+    [[1, 2, 3]].each { |(month, *)| out << month }
+    out
+  end
+  def self.only_rest
+    out = []
+    [[1, 2]].map { |(*row)| out << row }
+    out
+  end
+  def self.post
+    a, (b, *c, d) = [1, [2, 3, 4, 5]]
+    [a, b, c, d]
+  end
+  def self.short_post
+    a, (b, *c, d) = [1, [2]]
+    [a, b, c, d]
+  end
+  def self.scalar
+    a, (b, *c) = [1, 5]
+    [a, b, c]
+  end
+  def self.coerced
+    a, (b, *c) = [1, AryBox.new]
+    [a, b, c]
+  end
+  def self.deep
+    a, (b, (c, *d)) = [1, [2, [3, 4, 5]]]
+    [a, b, c, d]
+  end
+  def self.beside
+    (a, *b), c = [[1, 2, 3], 9]
+    [a, b, c]
+  end
+  def self.ivars
+    _head, (@month, *@row) = [0, [4, 5, 6]]
+    [@month, @row]
+  end
+  def self.expression
+    (a, (b, *c) = [1, [2, 3, 4]])
+  end
+  def self.lambda_param
+    unpack = ->((month, *row)) { [month, row] }
+    unpack.call([1, 2, 3])
+  end
+  def self.empty_block
+    [[1, 2, 3]].map { |(month, *row)| }
+  end
+  def self.private_to_ary
+    a, (b, *c) = [0, PrivateBox.new([4, 5])]
+    [a, b, c]
+  end
+  def self.basic_object
+    bare = BareElement.new
+    a, (b, *c) = [0, bare]
+    [a, b.equal?(bare), c]
+  end
+end
+
+class PrivateBox
+  def initialize(values)
+    @values = values
+  end
+
+  def to_ary
+    @values
+  end
+  private :to_ary
+end
+
+class BareElement < BasicObject
+end
+"#;
+    const ASSERTIONS: &str = r##"
+expected = {
+  each_with_object: {1 => [2, 3, 4], 5 => []},
+  anonymous: [1],
+  only_rest: [[1, 2]],
+  post: [1, 2, [3, 4], 5],
+  short_post: [1, 2, [], nil],
+  scalar: [1, 5, []],
+  coerced: [1, 7, [8, 9]],
+  deep: [1, 2, 3, [4, 5]],
+  beside: [1, [2, 3], 9],
+  ivars: [4, [5, 6]],
+  expression: [1, [2, 3, 4]],
+  lambda_param: [1, [2, 3]],
+  empty_block: [nil],
+  private_to_ary: [0, 4, [5]],
+  basic_object: [0, true, []]
+}
+expected.each do |method, want|
+  got = NestedSplatProbe.public_send(method)
+  raise "#{method}: #{got.inspect}, expected #{want.inspect}" unless got == want
+end
+"##;
+    let native = std::process::Command::new("ruby").arg("-e")
+        .arg(format!("{SOURCE}\n{ASSERTIONS}"))
+        .output().expect("CRuby control");
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+    emit_and_run::empty_app()
+        .write("app/controllers/application_controller.rb", "class ApplicationController < ActionController::Base\nend\n")
+        .write("db/schema.rb", "ActiveRecord::Schema.define(version: 1) do\nend\n")
+        .write("app/helpers/nested_splat_probe.rb", SOURCE)
+        .run_ruby(ASSERTIONS).assert_passes();
+}
+
 /// `recv.m(**payload, badge: b)` where nothing types `recv`: the app's
 /// one `m` takes `**rest`, so the `**` the ingest desugar erased is put
 /// back (campfire's `WebPush::Pool#deliver_later`). Passed positionally
