@@ -1382,6 +1382,32 @@ impl<'a> BodyTyper<'a> {
                 if id.0.as_str() == "ActiveSupport" && method.as_str() == "parse_db_date" {
                     return Ty::Union { variants: vec![Ty::Date, Ty::Nil].into() };
                 }
+                // Interval-column reader. Storage is whole seconds of text;
+                // the value is the Ruby-family Duration class.
+                if id.0.as_str() == "ActiveSupport" && method.as_str() == "parse_db_interval" {
+                    return Ty::Union {
+                        variants: vec![
+                            Ty::Class {
+                                id: crate::ident::ClassId(crate::ident::Symbol::from("ActiveSupport::Duration")),
+                                args: vec![].into(),
+                            },
+                            Ty::Nil,
+                        ].into(),
+                    };
+                }
+                // Write side of an interval column: a Duration becomes its
+                // whole-second count. A string or nil can fail to parse.
+                if id.0.as_str() == "ActiveSupport" && method.as_str() == "format_db_interval" {
+                    let plain_duration = matches!(
+                        call_args.first().and_then(|a| a.ty.as_ref()),
+                        Some(Ty::Class { id, .. }) if id.0.as_str() == "ActiveSupport::Duration"
+                    );
+                    return if plain_duration {
+                        Ty::Int
+                    } else {
+                        Ty::Union { variants: vec![Ty::Int, Ty::Nil].into() }
+                    };
+                }
                 // The Date calendar intrinsics `time_calendar` lowers to.
                 if id.0.as_str() == "ActiveSupport" {
                     match method.as_str() {

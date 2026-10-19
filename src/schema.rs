@@ -120,6 +120,11 @@ pub enum ColumnType {
     /// Not modeled as `String` at ingest so a schema round-trip and a
     /// per-dialect renderer can still tell the two apart.
     Uuid,
+    /// `t.interval` — a Postgres `interval` column. SQLite stores the
+    /// canonical whole-second count as INTEGER. The public reader is an
+    /// `ActiveSupport::Duration`; keeping a distinct variant lets
+    /// PostgreSQL DDL still say `interval`.
+    Interval,
     Reference { table: TableRef },
 }
 

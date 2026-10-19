@@ -3315,6 +3315,12 @@ fn ty_of_column(t: &ColumnType) -> Ty {
         // separately in `lower::has_json`.
         ColumnType::Json | ColumnType::Jsonb => Ty::Untyped,
         ColumnType::Uuid => Ty::Str,
+        // Rails casts a PostgreSQL interval to ActiveSupport::Duration.
+        // Storage stays text (`lower::model_to_library::ty_of_column`).
+        ColumnType::Interval => Ty::Class {
+            id: crate::ident::ClassId(crate::ident::Symbol::from("ActiveSupport::Duration")),
+            args: vec![].into(),
+        },
         ColumnType::Reference { .. } => Ty::Int,
     }
 }

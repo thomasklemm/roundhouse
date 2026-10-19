@@ -1,4 +1,5 @@
 # frozen_string_literal: true
+require_relative "active_support_interval"
 # Native date-only parsing plus UTC-safe timestamp parsing/stamping.
 #
 # Dates store as YYYY-MM-DD, with no time or zone. Separately,
@@ -212,4 +213,5 @@ module ActiveSupport
     end
     ActiveSupport.present(Time.new(year, mon, mday, parts.fetch(:hour, 0), parts.fetch(:min, 0), sec, parts[:offset]))
   end
+
 end

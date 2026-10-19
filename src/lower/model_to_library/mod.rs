@@ -2970,6 +2970,9 @@ pub fn ty_of_column(t: &ColumnType) -> Ty {
         // (`lower::has_json`), not as a Hash the whole column decodes to.
         ColumnType::Json | ColumnType::Jsonb => Ty::Str,
         ColumnType::Uuid => Ty::Str,
+        // Whole seconds. The public reader is ActiveSupport::Duration;
+        // this is the storage slot, an integer so order matches the count.
+        ColumnType::Interval => Ty::Int,
         ColumnType::Reference { .. } => Ty::Int,
     }
 }

@@ -6152,6 +6152,27 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
     if matches!(target, BuildTarget::Blog | BuildTarget::Ruby | BuildTarget::Roda) {
         return;
     }
+    // Column readers are synthesized inside the emitter, after this walk,
+    // so a Send match never sees them. The schema column is the fact.
+    if !matches!(target, BuildTarget::Jruby | BuildTarget::Spinel) {
+        for table in app.schema.tables.values() {
+            for column in &table.columns {
+                if column.col_type == crate::schema::ColumnType::Interval {
+                    emit::diagnostics::report_unsupported(
+                        crate::span::Span::synthetic(),
+                        target.as_str(),
+                        "interval",
+                        format!(
+                            "PostgreSQL interval column `{}.{}` lowers to ActiveSupport interval intrinsics; the {} runtime has no interval column runtime",
+                            table.name.as_str(),
+                            column.name.as_str(),
+                            target.as_str()
+                        ),
+                    );
+                }
+            }
+        }
+    }
     fn visit(expr: &crate::expr::Expr, app: &App, target: &str) {
         // Spinel matches this exception by its rescue name, but does not
         // expose its class as a constant. Keep the value guard below while
@@ -6198,6 +6219,21 @@ fn report_unsupported_bundled_constants(app: &App, target: BuildTarget) {
                     target,
                     "duration",
                     format!("ActiveSupport::Duration is the Ruby-family runtime's value class; the {target} runtime ships none"),
+                );
+            }
+            // Interval columns lower to these intrinsics. Ruby, JRuby, and
+            // Spinel ship them; a strict target must not emit a call it
+            // cannot run.
+            if let crate::expr::ExprNode::Send { recv: Some(recv), method, .. } = &*expr.node
+                && matches!(method.as_str(), "parse_db_interval" | "format_db_interval")
+                && matches!(&*recv.node, crate::expr::ExprNode::Const { path }
+                    if path.iter().map(|s| s.as_str()).skip_while(|s| s.is_empty()).eq(["ActiveSupport"]))
+            {
+                emit::diagnostics::report_unsupported(
+                    expr.span,
+                    target,
+                    "interval",
+                    format!("PostgreSQL interval columns use ActiveSupport.{}; the {target} runtime has no interval column runtime", method.as_str()),
                 );
             }
         }
@@ -6618,6 +6654,12 @@ fn spinel_files(app: &App, fixture: &Path, param_binds: bool) -> Result<(Vec<(St
         files.push((
             "sig/runtime/active_support_time_parsing.rbs".to_string(),
             rbs,
+        ));
+        let interval_rbs = crate::runtime_files::read_to_string("runtime/spinel/active_support_interval.rbs")
+            .map_err(|e| format!("read runtime/spinel/active_support_interval.rbs: {e}"))?;
+        files.push((
+            "sig/runtime/active_support_interval.rbs".to_string(),
+            interval_rbs,
         ));
     }
 

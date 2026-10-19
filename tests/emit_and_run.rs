@@ -9,6 +9,8 @@
 mod emit_and_run;
 #[path = "emit_and_run/date_calendar_duration.rs"]
 mod date_calendar_duration;
+#[path = "emit_and_run/interval_columns.rs"]
+mod interval_columns;
 #[path = "emit_and_run/utc_zone_time.rs"]
 mod utc_zone_time;
 #[path = "emit_and_run/discard.rs"]
