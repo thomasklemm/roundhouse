@@ -1306,6 +1306,9 @@ impl Analyzer {
 
     fn analyze_cached(&mut self, app: &mut App) {
         self.fixpoint_checks = fixpoint_check::Checks::start();
+        // Before any signature is copied. Anonymous `**` / `...` cannot
+        // survive flattened keywords, and `check` does not lower.
+        forwarding::restore_anonymous_forward_contracts(app);
         // An unresolvable include is a load-time error, not an open method
         // surface. Keep it in the class-body ledger even when no method is called.
         for class in &mut app.library_classes {

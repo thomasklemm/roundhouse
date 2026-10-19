@@ -13,7 +13,9 @@ use crate::ident::{ClassId, Symbol};
 use crate::span::Span;
 use crate::ty::Ty;
 
+mod anonymous;
 mod constructor;
+pub(crate) use anonymous::restore_anonymous_forward_contracts;
 pub(crate) use constructor::ConstructorContract;
 
 pub(super) fn diagnose(app: &App) -> Vec<Diagnostic> {
@@ -1014,6 +1016,13 @@ impl<'a> SourceContractIndex<'a> {
             };
             declarations.insert((owner.clone(), method.name.clone()), (method, model));
         }
+    }
+
+    /// A second source fragment can replace the keyword contract the
+    /// first fragment declared. Anonymous packets have no keys to
+    /// re-bind, so a reopened owner stays refused.
+    fn reopened(&self, owner: &ClassId) -> bool {
+        self.fragments.get(owner).copied().unwrap_or(0) > 1
     }
 
     fn parent(&self, owner: &ClassId) -> Option<&'a ClassId> {

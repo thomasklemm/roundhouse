@@ -451,10 +451,9 @@ fn mixed_anonymous_keyword_pairs_round_trip_as_an_ordered_group() {
 #[test]
 fn flattened_and_unknown_contracts_remain_errors_through_lowering() {
     for source in [
-        "class Probe\n def call(...)\n target(...)\n end\n def target(a, b, factor: 2)\n (a-b)*factor\n end\nend",
-        "class Probe\n def call(...)\n self.target(...)\n end\n def target(a, b, **kw)\n (a-b)*kw[:factor]\n end\nend",
-        "class Parent\n def call(a, b, factor: 2)\n (a-b)*factor\n end\nend\nclass Child < Parent\n def call(...)\n super\n end\nend",
-        "module Mixed\n def call(a, b, factor: 2)\n (a-b)*factor\n end\nend\nclass Parent\n def call(a,b,factor:)\n (a-b)*factor\n end\nend\nclass Child < Parent\n include Mixed\n def call(...)\n super(...)\n end\nend",
+        // Optional keywords, `**kw`, implicit `super`, and an included
+        // module's optional keywords are restored; see
+        // tests/service_call_forwarding.rs. An unknown callee is not.
         "class Probe\n def call(...)\n absent(...)\n end\nend",
     ] {
         let native = Command::new("ruby")
@@ -589,7 +588,6 @@ fn controller_declarations_are_kept_and_test_entry_declarations_are_rejected() {
 fn anonymous_keyword_forwarding_refuses_unverified_keyword_abis() {
     for source in [
         "class Probe; def call(__fwd_kwargs, **); missing(__fwd_kwargs, **); end; end",
-        "class Probe; def target(**options); options; end; def call(**); target(**); end; end",
         "class Probe; def target; 7; end; def call(**); target(**); end; end",
     ] {
         let mut app = analyzed(source);
