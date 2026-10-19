@@ -800,6 +800,24 @@ pub fn namespace_of(gem: &str) -> String {
     camelize(gem)
 }
 
+/// Whether `boot.rb` should `require` a locked unknown gem by its own name
+/// once the emitted program names that gem's namespace.
+///
+/// A normal gem's entry file is `lib/<gem>.rb`, and the constant lowercases
+/// to that name (`duckdb` → `DuckDB`). The same file exists for three
+/// irregular constants: `caxlsx` (`lib/caxlsx.rb`), `polars-df`
+/// (`lib/polars-df.rb`), and `ruby_llm` (`lib/ruby_llm.rb`). Requiring the
+/// lowercased constant (`axlsx`, `polars`, `rubyllm`) is not that entry.
+///
+/// `rubyzip` is not in this set. `require "rubyzip"` is not a file; the gem
+/// loads as `zip`.
+pub fn loads_by_gem_name(gem: &str) -> bool {
+    if namespace_of(gem).eq_ignore_ascii_case(gem) {
+        return true;
+    }
+    matches!(gem, "caxlsx" | "polars-df" | "ruby_llm")
+}
+
 /// The top-level constants a gem might define, best guess first: the
 /// whole name camelized, then — for a dashed name — its first segment
 /// alone.
@@ -1529,6 +1547,19 @@ end
         ] {
             assert!(gemfile.contains(pin), "missing {pin} in\n{gemfile}");
         }
+        let boot = files.iter().find(|(path, _)| path == "boot.rb").expect("boot.rb").1.as_str();
+        for feature in ["caxlsx", "duckdb", "mcp", "polars-df", "ruby_llm"] {
+            assert!(
+                boot.contains(&format!("require {feature:?}")),
+                "boot must load {feature} by gem name:\n{boot}"
+            );
+        }
+        assert!(
+            !boot.contains("require \"rubyzip\""),
+            "rubyzip has no rubyzip.rb entry; boot must not require that name:\n{boot}"
+        );
+        assert!(loads_by_gem_name("duckdb") && loads_by_gem_name("mcp"));
+        assert!(!loads_by_gem_name("rubyzip"));
     }
 
     #[test]

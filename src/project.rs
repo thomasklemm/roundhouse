@@ -8209,8 +8209,7 @@ fn apply_locked_external_gem_wiring(files: &mut Vec<(String, String)>, app: &App
     };
     let mut eager_requires = Vec::new();
     for gem in needed {
-        let namespace = crate::gems::namespace_of(&gem.name).to_ascii_lowercase();
-        if namespace == gem.name {
+        if crate::gems::loads_by_gem_name(&gem.name) {
             eager_requires.push(gem.name.clone());
         }
         let version = gem.version.as_deref();
